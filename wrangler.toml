@@ -1,6 +1,6 @@
 name = "bashupload"
 main = "src/index.js"
-compatibility_date = "2024-07-25"
+compatibility_date = "2025-08-16"
 
 # 绑定域名
 routes = [
