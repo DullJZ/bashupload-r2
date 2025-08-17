@@ -27,7 +27,7 @@ bashupload file.txt
 To make the alias persistent, add it to your shell configuration file.
 
 ```sh
-echo \'alias bashupload=\'curl bashupload.app -T\'\' >> ~/.bashrc
+echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
 source ~/.bashrc
 ```
 

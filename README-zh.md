@@ -26,7 +26,7 @@ bashupload file.txt
 要使别名永久生效，请将其添加到你的 shell 配置文件中。
 
 ```sh
-echo \'alias bashupload=\'curl bashupload.app -T\'\' >> ~/.bashrc
+echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
