@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BashUpload - 一次性文件分享服务 | One-Time File Sharing</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>BashUpload</h1>
+        <p class="subtitle lang-text" data-en="One-time file sharing service for the command line" data-zh="命令行一次性文件分享服务">One-time file sharing service for the command line</p>
+        <p style="color: #ff6b35; font-weight: bold; margin-top: 10px;">
+            <span class="lang-text" data-en="⚠️ Files can only be downloaded once and will be automatically deleted" data-zh="⚠️ 文件只能下载一次，下载后自动删除">⚠️ Files can only be downloaded once and will be automatically deleted</span>
+        </p>
+        
+        <div class="section">
+            <h2 class="lang-text" data-en="Quick Start" data-zh="快速开始">Quick Start</h2>
+            <div class="code-block">$ curl bashupload.app -T file.txt</div>
+        </div>
+
+        <div class="section">
+            <h2 class="lang-text" data-en="Browser Upload" data-zh="浏览器上传">Browser Upload</h2>
+            <div class="upload-container" id="uploadContainer">
+                <div class="upload-icon">📁</div>
+                <h3 class="lang-text" data-en="Drag & Drop files here" data-zh="拖放文件到这里">Drag & Drop files here</h3>
+                <p class="upload-text lang-text" data-en="or click to select files" data-zh="或点击选择文件">or click to select files</p>
+                <button class="upload-button lang-text" onclick="document.getElementById('fileInput').click()" data-en="Choose Files (Max 5GB)" data-zh="选择文件 (最大 5GB)">Choose Files (Max 5GB)</button>
+                <input type="file" id="fileInput" multiple onchange="handleFileSelect(event)">
+            </div>
+            <div class="upload-status" id="uploadStatus"></div>
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="file-list" id="fileList"></div>
+        </div>
+
+        <div class="section">
+            <h2 class="lang-text" data-en="Features" data-zh="特征">Features</h2>
+            <div class="features">
+                <div class="feature" style="color: #ff6b35; font-weight: bold;">
+                    <span class="lang-text" data-en="🔐 One-time download: Files are deleted after first access" data-zh="🔐 一次性下载：文件在首次访问后删除">🔐 One-time download: Files are deleted after first access</span>
+                </div>
+                <div class="feature" style="color: #ff6b35; font-weight: bold;">
+                    <span class="lang-text" data-en="🛡️ Maximum privacy: No file persistence" data-zh="🛡️ 最大隐私保护：文件不持久保存">🛡️ Maximum privacy: No file persistence</span>
+                </div>
+                <div class="feature lang-text" data-en="Simple command-line interface" data-zh="简单的命令行接口">Simple command-line interface</div>
+                <div class="feature lang-text" data-en="Browser-based drag & drop upload" data-zh="浏览器拖放上传">Browser-based drag & drop upload</div>
+                <div class="feature lang-text" data-en="No registration required" data-zh="无需注册">No registration required</div>
+                <div class="feature lang-text" data-en="Privacy-focused: Random filenames" data-zh="隐私保护：随机文件名">Privacy-focused: Random filenames</div>
+                <div class="feature lang-text" data-en="Secure temporary storage with Cloudflare R2" data-zh="使用 Cloudflare R2 安全临时存储">Secure temporary storage with Cloudflare R2</div>
+                <div class="feature lang-text" data-en="Supports files up to 5GB in size" data-zh="支持最大 5GB 的文件">Supports files up to 5GB in size</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2 class="lang-text" data-en="Examples" data-zh="示例">Examples</h2>
+            <div class="code-block lang-code" data-en="# Upload a file
+$ curl bashupload.app -T myfile.pdf
+https://bashupload.app/abc123de.pdf
+
+# Upload with custom name
+$ curl bashupload.app -T document.docx
+https://bashupload.app/xyz789ab.docx" data-zh="# 上传文件
+$ curl bashupload.app -T myfile.pdf
+https://bashupload.app/abc123de.pdf
+
+# 上传自定义名称的文件
+$ curl bashupload.app -T document.docx
+https://bashupload.app/xyz789ab.docx"># Upload a file
+$ curl bashupload.app -T myfile.pdf
+https://bashupload.app/abc123de.pdf
+
+# Upload with custom name
+$ curl bashupload.app -T document.docx
+https://bashupload.app/xyz789ab.docx</div>
+        </div>
+
+        <div class="section">
+            <h2 class="lang-text" data-en="How It Works" data-zh="工作原理">How It Works</h2>
+            <ol>
+                <li class="lang-text" data-en="Use curl with the -T flag to upload your file" data-zh="使用 curl 和 -T 选项上传文件">Use curl with the -T flag to upload your file</li>
+                <li class="lang-text" data-en="Receive a unique one-time download URL" data-zh="接收唯一的一次性下载链接">Receive a unique one-time download URL</li>
+                <li class="lang-text" data-en="Share the URL - it works only once!" data-zh="分享链接 - 只能使用一次！">Share the URL - it works only once!</li>
+                <li class="lang-text" data-en="File is automatically deleted after download" data-zh="文件在下载后自动删除">File is automatically deleted after download</li>
+            </ol>
+        </div>
+
+        <div class="note" style="background-color: #fff3cd; border-color: #ff6b35;">
+            <strong class="lang-text" data-en="⚠️ One-Time Download Notice:" data-zh="⚠️ 一次性下载注意：">⚠️ One-Time Download Notice:</strong>
+            <span class="lang-text" data-en="Files uploaded to this service can only be downloaded ONCE. After the first download, the file is automatically and permanently deleted from our servers. This ensures maximum privacy and security for your shared files. Make sure the recipient is ready to download the file when you share the link." data-zh="上传到此服务的文件只能下载一次。首次下载后，文件将自动并永久地从我们的服务器删除。这确保了您共享文件的最大隐私和安全性。分享链接前，请确保接收者已准备好下载文件。">Files uploaded to this service can only be downloaded ONCE. After the first download, the file is automatically and permanently deleted from our servers. This ensures maximum privacy and security for your shared files. Make sure the recipient is ready to download the file when you share the link.</span>
+        </div>
+    </div>
+
+    <script src="/upload.js"></script>
+</body>
+</html>

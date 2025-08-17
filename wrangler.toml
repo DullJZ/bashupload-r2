@@ -1,0 +1,29 @@
+name = "bashupload"
+main = "src/index.js"
+compatibility_date = "2024-07-25"
+
+# 绑定域名
+routes = [
+	{ pattern = "bashupload.app", custom_domain = true }
+]
+
+# R2 存储桶绑定
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "bashupload"
+
+# 环境变量
+[vars]
+MAX_UPLOAD_SIZE = 5368709120
+
+# 静态文件
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# 开启日志
+[observability.logs]
+enabled = true
+
+
+
