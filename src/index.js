@@ -6,14 +6,14 @@ export default {
     // 获取 MAX_AGE 配置（秒），默认 3600 秒（1小时）
     const maxAge = parseInt(env.MAX_AGE || '3600', 10);
     const now = Date.now();
-    
-  console.log(`[Scheduled Task] Start cleaning expired files, MAX_AGE: ${maxAge}s`);
-    
+
+    console.log(`[Scheduled Task] Start cleaning expired files, MAX_AGE: ${maxAge}s`);
+
     try {
       let deletedCount = 0;
       let checkedCount = 0;
       let cursor = undefined;
-      
+
       // 分页处理文件列表，避免一次性加载过多文件
       do {
         // 每次最多处理 1000 个文件
@@ -21,30 +21,30 @@ export default {
           limit: 1000,
           cursor: cursor,
         });
-        
+
         // 并行处理文件检查和删除，提高效率
         const deletePromises = [];
-        
+
         for (const object of listed.objects) {
           checkedCount++;
-          
+
           // 创建异步删除任务
           const deleteTask = (async () => {
             try {
               // 获取文件的元数据
               const fileInfo = await env.R2_BUCKET.head(object.key);
-              
+
               if (fileInfo) {
                 // 获取文件上传时间
                 // 优先使用自定义元数据中的 uploadTime，如果没有则使用 uploaded 时间
-                const uploadTime = fileInfo.customMetadata?.uploadTime 
+                const uploadTime = fileInfo.customMetadata?.uploadTime
                   ? new Date(fileInfo.customMetadata.uploadTime).getTime()
                   : fileInfo.uploaded.getTime();
-                
+
                 // 计算文件年龄（毫秒）
                 const age = now - uploadTime;
                 const ageInSeconds = Math.floor(age / 1000);
-                
+
                 // 如果文件年龄超过 MAX_AGE，删除文件
                 if (ageInSeconds > maxAge) {
                   await env.R2_BUCKET.delete(object.key);
@@ -57,20 +57,20 @@ export default {
             }
             return false;
           })();
-          
+
           deletePromises.push(deleteTask);
         }
-        
+
         // 等待所有删除任务完成
         const results = await Promise.all(deletePromises);
         deletedCount += results.filter(deleted => deleted).length;
-        
+
         // 更新游标以获取下一页
         cursor = listed.truncated ? listed.cursor : undefined;
-        
+
       } while (cursor); // 如果还有更多文件，继续处理
-      
-  console.log(`[Scheduled Task] Cleanup complete: checked ${checkedCount} files, deleted ${deletedCount} expired files`);
+
+      console.log(`[Scheduled Task] Cleanup complete: checked ${checkedCount} files, deleted ${deletedCount} expired files`);
     } catch (error) {
       console.error('[Scheduled Task] Error during cleanup:', error);
     }
@@ -87,11 +87,11 @@ export default {
         // 检查 User-Agent 以确定是浏览器还是 curl
         const userAgent = request.headers.get('user-agent') || '';
         if (userAgent.toLowerCase().includes('curl')) {
-        // 如果是 curl，返回简单的文本说明
-        return new Response(`bashupload.app - 一次性文件分享服务\n\n使用方法 Usage:\n  curl bashupload.app -T file.txt\n\n特性 Features:\n  • 文件只能下载一次 / Files can only be downloaded once\n  • 下载后自动删除 / Auto-delete after download\n  • 保护隐私安全 / Privacy protection\n`, {
-          status: 200,
-          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-        });
+          // 如果是 curl，返回简单的文本说明
+          return new Response(`bashupload.app - 一次性文件分享服务\n\n使用方法 Usage:\n  curl bashupload.app -T file.txt\n\n特性 Features:\n  • 文件只能下载一次 / Files can only be downloaded once\n  • 下载后自动删除 / Auto-delete after download\n  • 保护隐私安全 / Privacy protection\n`, {
+            status: 200,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          });
         }
         // 如果是浏览器，重定向到 index.html
         return Response.redirect(url.origin + '/index.html', 302);
@@ -99,7 +99,7 @@ export default {
 
       // 处理静态资源路径映射
       let fileName = pathname.substring(1); // 移除开头的斜杠
-      
+
       if (fileName === 'index.html' || fileName === 'style.css' || fileName === 'upload.js') {
         try {
           const assetResponse = await env.ASSETS.fetch(`/${fileName}`, {});
@@ -122,14 +122,14 @@ export default {
           const headers = new Headers();
           object.writeHttpMetadata(headers);
           headers.set('etag', object.httpEtag);
-          
+
           // 使用 mime.js 根据文件名获取 Content-Type
           const contentType = mime.getType(fileName) || 'application/octet-stream';
           headers.set('Content-Type', contentType);
-          
+
           // 先获取文件内容
           const body = object.body;
-          
+
           // 一次性下载：下载后立即删除文件
           // 使用 ctx.waitUntil 确保删除操作在响应发送后执行
           ctx.waitUntil(
@@ -144,7 +144,7 @@ export default {
               }
             })()
           );
-          
+
           // 添加响应头标识这是一次性下载
           headers.set('X-One-Time-Download', 'true');
           headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -193,7 +193,7 @@ export default {
           contentType: contentType,
         },
         // 添加自定义元数据，标记为一次性文件
-        customMetadata: { 
+        customMetadata: {
           oneTime: 'true',
           uploadTime: new Date().toISOString()
         },
@@ -202,10 +202,10 @@ export default {
       // 返回上传成功的 URL
       const url = new URL(request.url);
       const fileUrl = `${url.protocol}//${url.hostname}/${fileName}`;
-      
+
       // 返回简单的文本响应，提醒用户这是一次性下载
       const responseText = `${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
-      
+
       return new Response(responseText, {
         status: 200,
         headers: {
@@ -215,7 +215,7 @@ export default {
       });
     } catch (e) {
       console.error('Upload error:', e);
-      return new Response(`Upload failed: ${e.message}\n`, { 
+      return new Response(`Upload failed: ${e.message}\n`, {
         status: 500,
         headers: {
           'Content-Type': 'text/plain',
