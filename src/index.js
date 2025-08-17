@@ -63,9 +63,9 @@ export default {
                 // 小延迟，确保文件先被发送
                 await new Promise(resolve => setTimeout(resolve, 100));
                 await env.R2_BUCKET.delete(fileName);
-                console.log(`已删除一次性文件: ${fileName}`);
+                console.log(`[One-Time Download] Deleted file: ${fileName}`);
               } catch (deleteError) {
-                console.error(`删除文件 ${fileName} 失败:`, deleteError);
+                console.error(`[One-Time Download] Failed to delete file ${fileName}:`, deleteError);
               }
             })()
           );
