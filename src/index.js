@@ -1,6 +1,81 @@
 import mime from 'mime';
 
 export default {
+  // 处理定时任务
+  async scheduled(event, env, ctx) {
+    // 获取 MAX_AGE 配置（秒），默认 3600 秒（1小时）
+    const maxAge = parseInt(env.MAX_AGE || '3600', 10);
+    const now = Date.now();
+    
+  console.log(`[Scheduled Task] Start cleaning expired files, MAX_AGE: ${maxAge}s`);
+    
+    try {
+      let deletedCount = 0;
+      let checkedCount = 0;
+      let cursor = undefined;
+      
+      // 分页处理文件列表，避免一次性加载过多文件
+      do {
+        // 每次最多处理 1000 个文件
+        const listed = await env.R2_BUCKET.list({
+          limit: 1000,
+          cursor: cursor,
+        });
+        
+        // 并行处理文件检查和删除，提高效率
+        const deletePromises = [];
+        
+        for (const object of listed.objects) {
+          checkedCount++;
+          
+          // 创建异步删除任务
+          const deleteTask = (async () => {
+            try {
+              // 获取文件的元数据
+              const fileInfo = await env.R2_BUCKET.head(object.key);
+              
+              if (fileInfo) {
+                // 获取文件上传时间
+                // 优先使用自定义元数据中的 uploadTime，如果没有则使用 uploaded 时间
+                const uploadTime = fileInfo.customMetadata?.uploadTime 
+                  ? new Date(fileInfo.customMetadata.uploadTime).getTime()
+                  : fileInfo.uploaded.getTime();
+                
+                // 计算文件年龄（毫秒）
+                const age = now - uploadTime;
+                const ageInSeconds = Math.floor(age / 1000);
+                
+                // 如果文件年龄超过 MAX_AGE，删除文件
+                if (ageInSeconds > maxAge) {
+                  await env.R2_BUCKET.delete(object.key);
+                  console.log(`[Scheduled Task] Deleted expired file: ${object.key}, age: ${ageInSeconds}s`);
+                  return true; // 返回 true 表示删除了文件
+                }
+              }
+            } catch (error) {
+              console.error(`[Scheduled Task] Error processing file ${object.key}:`, error);
+            }
+            return false;
+          })();
+          
+          deletePromises.push(deleteTask);
+        }
+        
+        // 等待所有删除任务完成
+        const results = await Promise.all(deletePromises);
+        deletedCount += results.filter(deleted => deleted).length;
+        
+        // 更新游标以获取下一页
+        cursor = listed.truncated ? listed.cursor : undefined;
+        
+      } while (cursor); // 如果还有更多文件，继续处理
+      
+  console.log(`[Scheduled Task] Cleanup complete: checked ${checkedCount} files, deleted ${deletedCount} expired files`);
+    } catch (error) {
+      console.error('[Scheduled Task] Error during cleanup:', error);
+    }
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const pathname = url.pathname;

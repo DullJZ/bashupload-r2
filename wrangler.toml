@@ -26,5 +26,9 @@ binding = "ASSETS"
 [observability.logs]
 enabled = true
 
+# 定时任务 - 每5分钟执行一次清理
+[triggers]
+crons = ["*/5 * * * *"]
+
 
 
