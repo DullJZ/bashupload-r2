@@ -14,7 +14,8 @@ bucket_name = "bashupload"
 
 # 环境变量
 [vars]
-MAX_UPLOAD_SIZE = 5368709120
+MAX_UPLOAD_SIZE = "5368709120"
+MAX_AGE = "3600"
 
 # 静态文件
 [assets]
