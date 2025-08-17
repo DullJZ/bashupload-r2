@@ -13,7 +13,7 @@
 ## 快速开始
 
 ```sh
-$ curl bashupload.app -T file.txt
+curl bashupload.app -T file.txt
 ```
 
 使用命令行别名快速设置
@@ -21,6 +21,13 @@ $ curl bashupload.app -T file.txt
 ```sh
 alias bashupload='curl bashupload.app -T'
 bashupload file.txt
+```
+
+要使别名永久生效，请将其添加到你的 shell 配置文件中。
+
+```sh
+echo \'alias bashupload=\'curl bashupload.app -T\'\' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ## 浏览器上传
@@ -43,7 +50,7 @@ bashupload file.txt
 
 ```sh
 # 上传文件
-$ curl bashupload.app -T myfile.pdf
+curl bashupload.app -T myfile.pdf
 https://bashupload.app/abc123_myfile.pdf
 ```
 
@@ -52,12 +59,6 @@ https://bashupload.app/abc123_myfile.pdf
 
 ## 自部署到Cloudflare
 
-点击上方的 "Deploy to Cloudflare" 按钮，或按照以下步骤手动部署：
+点击上方的 "Deploy to Cloudflare" 按钮，修改配置。
 
-1. **创建 Cloudflare R2 存储桶**：在 Cloudflare 仪表盘中创建一个新的 R2 存储桶，用于存储上传的文件。名称可以是 `bashupload` 或其他您喜欢的名称。
-2. **Fork存储库**：点击Fork按钮，将 BashUpload-R2 的代码Fork到您的 GitHub。
-3. **在 Cloudflare 仪表盘中创建 Workers**：在 Cloudflare 仪表盘中创建一个新的 Workers 服务，在设置中将 Fork 的代码仓库链接到该服务。
-4. **修改配置文件**：在 Fork 的代码仓库中，找到 `wrangler.jsonc` 配置文件，设置 `r2_buckets` 中的 `bucket_name` 为您的 R2 存储桶名称；设置 `routes` 中的域名或路由（参见[文档](https://developers.cloudflare.com/workers/configuration/routing/)）。
-
-   如果您需要更大的单文件上传限制，可以在 `main.go` 中设置 `const maxFileSize = 5 * 1024 * 1024 * 1024`
-5. **上传并部署**：提交你的更改到 GitHub，Cloudflare 会自动检测到更改并部署 Workers 服务。
+其中，`MAX_UPLOAD_SIZE`单位为字节（默认为 5GB），`MAX_AGE`单位为秒（默认为 1小时），可以根据需要进行调整。

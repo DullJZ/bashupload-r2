@@ -19,7 +19,41 @@ h1 {
 }
 .subtitle {
     color: #7f8c8d;
-    margin-bottom: 30px;
+    margin-bottom: 20px;
+}
+.action-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.github-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background-color: #24292e;
+    color: white;
+    text-decoration: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+.github-link:hover {
+    background-color: #2c3137;
+}
+.github-icon {
+    display: inline-block;
+    vertical-align: middle;
+}
+.star-message {
+    color: #586069;
+    font-size: 14px;
+    text-align: center;
+    margin: 10px 0 15px 0;
+    font-style: italic;
 }
 .code-block {
     background-color: #2c3e50;
