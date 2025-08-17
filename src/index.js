@@ -89,6 +89,20 @@ export default {
     }
 
     try {
+      // 获取最大上传大小（字节），默认 5GB
+      const maxUploadSize = parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10);
+      // 检查 Content-Length
+      const contentLengthHeader = request.headers.get('content-length');
+      if (contentLengthHeader) {
+        const contentLength = parseInt(contentLengthHeader, 10);
+        if (!isNaN(contentLength) && contentLength > maxUploadSize) {
+          return new Response(`Upload failed: file too large. Max size is ${formatBytes(maxUploadSize)}.\n`, {
+            status: 413,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          });
+        }
+      }
+
       // 生成随机文件名
       const randomId = generateRandomId();
       const contentType = request.headers.get('content-type') || 'application/octet-stream';
@@ -144,5 +158,14 @@ function generateRandomId() {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return result;
+}
+
+// 格式化字节数为可读字符串
+function formatBytes(bytes) {
+  if (bytes === 0) return '0B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + sizes[i];
 }
 
