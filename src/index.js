@@ -240,7 +240,7 @@ export default {
       }
 
       // 返回简单的文本响应，提醒用户这是一次性下载
-      const responseText = `${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
+      const responseText = `\n\n${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
 
       return new Response(responseText, {
         status: 200,
