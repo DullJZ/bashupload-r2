@@ -102,7 +102,7 @@ export default {
 
       if (fileName === 'index.html' || fileName === 'style.css' || fileName === 'upload.js') {
         try {
-          const assetResponse = await env.ASSETS.fetch(`/${fileName}`, {});
+          const assetResponse = await env.ASSETS.fetch(`https://assets.local/${fileName}`);
           if (assetResponse.status === 200) {
             return assetResponse;
           }
