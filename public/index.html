@@ -40,6 +40,16 @@
                 <p class="upload-text lang-text" data-en="or click to select files" data-zh="或点击选择文件">or click to select files</p>
                 <button class="upload-button lang-text" onclick="document.getElementById('fileInput').click()" data-en="Choose Files (Max 5GB)" data-zh="选择文件 (最大 5GB)">Choose Files (Max 5GB)</button>
                 <input type="file" id="fileInput" multiple onchange="handleFileSelect(event)">
+                <div class="upload-options">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="useShortUrl" class="checkbox-input">
+                        <span class="lang-text" data-en="Generate short URL" data-zh="生成短网址">Generate short URL</span>
+                        <span class="tooltip-icon">ℹ️</span>
+                        <span class="tooltip-text lang-text" 
+                              data-en="Generate a shorter URL for easier sharing" 
+                              data-zh="生成更短的网址，方便分享">Generate a shorter URL for easier sharing</span>
+                    </label>
+                </div>
             </div>
             <div class="upload-status" id="uploadStatus"></div>
             <div class="progress-bar" id="progressBar">

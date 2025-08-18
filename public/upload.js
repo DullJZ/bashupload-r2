@@ -242,9 +242,12 @@ function uploadWithProgress(file, onProgress) {
             reject(new Error('Network error occurred'));
         });
         
+        // Check if short URL option is selected
+        const useShortUrl = document.getElementById('useShortUrl')?.checked;
+        const uploadPath = useShortUrl ? `${UPLOAD_URL}/dwz` : `${UPLOAD_URL}/${file.name}`;
         
         // Make the request using PUT method to match curl -T behavior
-        xhr.open('PUT', `${UPLOAD_URL}/${file.name}`);
+        xhr.open('PUT', uploadPath);
         xhr.send(file);
     });
 }

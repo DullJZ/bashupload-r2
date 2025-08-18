@@ -14,20 +14,27 @@ Thanks to [bashupload.com](https://bashupload.com) and its author [@mrcrypster](
 ## Quick Start
 
 ```sh
+# Upload with normal URL
 curl bashupload.app -T file.txt
+
+# Upload with short URL (dwz = 短网址)
+curl bashupload.app/dwz -T file.txt
 ```
 
 Use `alias` in bash to set quick upload
 
 ```sh
 alias bashupload='curl bashupload.app -T'
-bashupload file.txt
+alias bashuploaddwz='curl bashupload.app/dwz -T'
+bashupload file.txt        # Returns normal URL
+bashuploaddwz file.txt     # Returns short URL
 ```
 
 To make the alias persistent, add it to your shell configuration file.
 
 ```sh
 echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
+echo "alias bashuploaddwz='curl bashupload.app/dwz -T'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -47,13 +54,6 @@ source ~/.bashrc
 - Secure file storage with one-time download
 - Supports files up to 5GB in size (self-hosting can adjust this limit)
 
-## Examples
-
-```sh
-# Upload a file
-curl bashupload.app -T myfile.pdf
-https://bashupload.app/abc123_myfile.pdf
-```
 
 **Privacy Notice:** For your privacy and security, files are automatically deleted from our servers immediately after they are downloaded. Each file can only be downloaded once. Make sure to save the file locally after downloading, as the link will no longer work after the first download.
 
@@ -62,3 +62,5 @@ https://bashupload.app/abc123_myfile.pdf
 Click the "Deploy to Cloudflare" button above to modify the configuration.
 
 `MAX_UPLOAD_SIZE` is in bytes (default is 5GB), and `MAX_AGE` is in seconds (default is 1 hour). You can adjust these values as needed.
+
+`SHORT_URL_SERVICE` is the short URL service API endpoint (default is `https://suosuo.de/short`), you can change it to your own short URL service if needed. Only support [MyUrls](https://github.com/CareyWang/MyUrls).
