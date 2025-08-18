@@ -17,24 +17,24 @@ Thanks to [bashupload.com](https://bashupload.com) and its author [@mrcrypster](
 # Upload with normal URL
 curl bashupload.app -T file.txt
 
-# Upload with short URL (dwz = 短网址)
-curl bashupload.app/dwz -T file.txt
+# Upload with short URL
+curl bashupload.app/short -T file.txt
 ```
 
 Use `alias` in bash to set quick upload
 
 ```sh
 alias bashupload='curl bashupload.app -T'
-alias bashuploaddwz='curl bashupload.app/dwz -T'
+alias bashuploadshort='curl bashupload.app/short -T'
 bashupload file.txt        # Returns normal URL
-bashuploaddwz file.txt     # Returns short URL
+bashuploadshort file.txt     # Returns short URL
 ```
 
 To make the alias persistent, add it to your shell configuration file.
 
 ```sh
 echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
-echo "alias bashuploaddwz='curl bashupload.app/dwz -T'" >> ~/.bashrc
+echo "alias bashuploadshort='curl bashupload.app/short -T'" >> ~/.bashrc
 source ~/.bashrc
 ```
 

@@ -244,7 +244,7 @@ function uploadWithProgress(file, onProgress) {
         
         // Check if short URL option is selected
         const useShortUrl = document.getElementById('useShortUrl')?.checked;
-        const uploadPath = useShortUrl ? `${UPLOAD_URL}/dwz` : `${UPLOAD_URL}/${file.name}`;
+        const uploadPath = useShortUrl ? `${UPLOAD_URL}/short` : `${UPLOAD_URL}/${file.name}`;
         
         // Make the request using PUT method to match curl -T behavior
         xhr.open('PUT', uploadPath);

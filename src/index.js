@@ -88,7 +88,7 @@ export default {
         const userAgent = request.headers.get('user-agent') || '';
         if (userAgent.toLowerCase().includes('curl')) {
           // 如果是 curl，返回简单的文本说明
-          return new Response(`bashupload.app - 一次性文件分享服务\n\n使用方法 Usage:\n  curl bashupload.app -T file.txt        # 返回普通链接 / Normal URL\n  curl bashupload.app/dwz -T file.txt    # 返回短链接 / Short URL\n\n特性 Features:\n  • 文件只能下载一次 / Files can only be downloaded once\n  • 下载后自动删除 / Auto-delete after download\n  • 保护隐私安全 / Privacy protection\n`, {
+          return new Response(`bashupload.app - 一次性文件分享服务\n\n使用方法 Usage:\n  curl bashupload.app -T file.txt          # 返回普通链接 / Normal URL\n  curl bashupload.app/short -T file.txt    # 返回短链接 / Short URL\n\n特性 Features:\n  • 文件只能下载一次 / Files can only be downloaded once\n  • 下载后自动删除 / Auto-delete after download\n  • 保护隐私安全 / Privacy protection\n`, {
             status: 200,
             headers: { 'Content-Type': 'text/plain; charset=utf-8' },
           });
@@ -164,8 +164,8 @@ export default {
     }
 
     try {
-      // 检查是否是 /dwz 路径，如果是则强制使用短链接
-      const forceShortUrl = pathname === '/dwz' || pathname.startsWith('/dwz/');
+      // 检查是否是 /short 路径，如果是则强制使用短链接
+      const forceShortUrl = pathname === '/short' || pathname.startsWith('/short/');
       // 获取最大上传大小（字节），默认 5GB
       const maxUploadSize = parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10);
       // 检查 Content-Length
@@ -205,7 +205,7 @@ export default {
       const url = new URL(request.url);
       let fileUrl = `${url.protocol}//${url.hostname}/${fileName}`;
 
-      // 如果使用 /dwz 路径，尝试生成短链接
+      // 如果使用 /short 路径，尝试生成短链接
       if (forceShortUrl) {
         try {
           // 将长链接转换为 base64
@@ -231,9 +231,9 @@ export default {
           }
         } catch (error) {
           console.error('Failed to generate short URL:', error);
-          // 如果是 /dwz 路径但短链接生成失败，提示用户
+          // 如果是 /short 路径但短链接生成失败，提示用户
           if (forceShortUrl) {
-            console.warn('Short URL was requested via /dwz but generation failed, falling back to original URL');
+            console.warn('Short URL was requested via /short but generation failed, falling back to original URL');
           }
           // 继续使用原始链接
         }

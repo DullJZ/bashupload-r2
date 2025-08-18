@@ -17,23 +17,23 @@
 curl bashupload.app -T file.txt
 
 # 上传并返回短链接
-curl bashupload.app/dwz -T file.txt
+curl bashupload.app/short -T file.txt
 ```
 
 使用命令行别名快速设置
 
 ```sh
 alias bashupload='curl bashupload.app -T'
-alias bashuploaddwz='curl bashupload.app/dwz -T'
+alias bashuploadshort='curl bashupload.app/short -T'
 bashupload file.txt        # 返回普通链接
-bashuploaddwz file.txt     # 返回短链接
+bashuploadshort file.txt     # 返回短链接
 ```
 
 要使别名永久生效，请将其添加到你的 shell 配置文件中。
 
 ```sh
 echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
-echo "alias bashuploaddwz='curl bashupload.app/dwz -T'" >> ~/.bashrc
+echo "alias bashuploadshort='curl bashupload.app/short -T'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
