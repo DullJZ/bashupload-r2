@@ -28,13 +28,65 @@ function switchLanguage(lang) {
             element.textContent = text;
         }
     });
+    // Update password placeholder if password container is visible
+    const passwordContainer = document.getElementById('passwordContainer');
+    if (passwordContainer.style.display !== 'none') {
+        updatePasswordPlaceholder();
+    }
 }
 
 // Initialize language on page load
 document.addEventListener('DOMContentLoaded', function() {
     currentLang = detectLanguage();
     switchLanguage(currentLang);
+    
+    // Set up password checkbox functionality
+    const usePasswordCheckbox = document.getElementById('usePassword');
+    const passwordContainer = document.getElementById('passwordContainer');
+    const passwordInput = document.getElementById('passwordInput');
+    
+    usePasswordCheckbox.addEventListener('change', function() {
+        if (this.checked) {
+            passwordContainer.style.display = 'block';
+            // Update placeholder text based on language
+            updatePasswordPlaceholder();
+            // Focus on password input
+            setTimeout(() => passwordInput.focus(), 100);
+        } else {
+            passwordContainer.style.display = 'none';
+            passwordInput.value = '';
+        }
+    });
+    
+    // Add visual feedback for password input
+    passwordInput.addEventListener('input', function() {
+        if (this.value.trim()) {
+            this.style.borderColor = '#28a745';
+            this.style.boxShadow = '0 0 0 2px rgba(40, 167, 69, 0.1)';
+        } else {
+            this.style.borderColor = '#ddd';
+            this.style.boxShadow = 'none';
+        }
+    });
 });
+
+function updatePasswordPlaceholder() {
+    const passwordInput = document.getElementById('passwordInput');
+    const enPlaceholder = passwordInput.getAttribute('data-en-placeholder');
+    const zhPlaceholder = passwordInput.getAttribute('data-zh-placeholder');
+    passwordInput.placeholder = currentLang === 'zh' ? zhPlaceholder : enPlaceholder;
+    
+    // Update password notice text
+    const passwordNotice = document.getElementById('passwordNotice');
+    if (passwordNotice) {
+        const noticeText = passwordNotice.querySelector('.lang-text');
+        if (noticeText) {
+            const enText = noticeText.getAttribute('data-en');
+            const zhText = noticeText.getAttribute('data-zh');
+            noticeText.textContent = currentLang === 'zh' ? zhText : enText;
+        }
+    }
+}
 
 // Get DOM elements
 const uploadContainer = document.getElementById('uploadContainer');
@@ -120,11 +172,22 @@ async function uploadFile(file) {
         return;
     }
     
+    // Check if password protection is enabled but no password provided
+    const usePassword = document.getElementById('usePassword')?.checked;
+    const passwordInput = document.getElementById('passwordInput');
+    if (usePassword && (!passwordInput || !passwordInput.value.trim())) {
+        const errorMsg = currentLang === 'zh' 
+            ? '请输入密码以启用密码保护。' 
+            : 'Please enter a password to enable password protection.';
+        showStatus(errorMsg, 'error');
+        return;
+    }
+    
     // Always use simple upload - our Worker handles everything
     uploadSimpleFile(file);
 }
 
-function addFileToList(fileName, url) {
+function addFileToList(fileName, url, usePassword = false) {
     const fileItem = document.createElement('div');
     fileItem.className = 'file-item';
     
@@ -136,6 +199,18 @@ function addFileToList(fileName, url) {
     warningText.innerHTML = currentLang === 'zh' 
         ? '⚠️ 注意：此链接只能使用一次，下载后文件将自动删除' 
         : '⚠️ Note: This link can only be used once, file will be deleted after download';
+    
+    // 添加密码保护警告
+    let passwordWarning = null;
+    if (usePassword) {
+        passwordWarning = document.createElement('div');
+        passwordWarning.style.color = '#e74c3c';
+        passwordWarning.style.fontSize = '12px';
+        passwordWarning.style.marginBottom = '5px';
+        passwordWarning.innerHTML = currentLang === 'zh' 
+            ? '🔒 注意：此链接需要密码才能下载' 
+            : '🔒 Note: This link requires a password to download';
+    }
     
     const fileUrl = document.createElement('span');
     fileUrl.className = 'file-url';
@@ -153,6 +228,9 @@ function addFileToList(fileName, url) {
     };
     
     fileItem.appendChild(warningText);
+    if (passwordWarning) {
+        fileItem.appendChild(passwordWarning);
+    }
     fileItem.appendChild(fileUrl);
     fileItem.appendChild(copyButton);
     fileList.appendChild(fileItem);
@@ -182,8 +260,9 @@ async function uploadSimpleFile(file, maxRetries = 3) {
                     showStatus(successMsg, 'success');
                     // 提取纯URL（去除警告信息）
                     const cleanUrl = responseUrl.split('\n')[0];
-                    addFileToList(file.name, cleanUrl);
-                    uploadedFiles.push({ name: file.name, url: cleanUrl });
+                    const usePassword = document.getElementById('usePassword')?.checked;
+                    addFileToList(file.name, cleanUrl, usePassword);
+                    uploadedFiles.push({ name: file.name, url: cleanUrl, passwordProtected: usePassword });
                     return;
                 } else {
                     const errorMsg = currentLang === 'zh' 
@@ -191,6 +270,14 @@ async function uploadSimpleFile(file, maxRetries = 3) {
                         : 'Upload completed but received unexpected response';
                     throw new Error(errorMsg);
                 }
+            } else if (response.status === 401) {
+                // Handle password error specifically
+                hideProgress();
+                const passwordErrorMsg = currentLang === 'zh' 
+                    ? '密码错误，请检查您输入的密码是否与服务器配置的PASSWORD环境变量相同' 
+                    : 'Password error, please check that the password you entered matches the PASSWORD environment variable configured on the server';
+                showStatus(passwordErrorMsg, 'error');
+                return;
             } else {
                 throw new Error(`Server returned status ${response.status}`);
             }
@@ -246,8 +333,18 @@ function uploadWithProgress(file, onProgress) {
         const useShortUrl = document.getElementById('useShortUrl')?.checked;
         const uploadPath = useShortUrl ? `${UPLOAD_URL}/short` : `${UPLOAD_URL}/${file.name}`;
         
+        // Check if password protection is enabled
+        const usePassword = document.getElementById('usePassword')?.checked;
+        const passwordInput = document.getElementById('passwordInput');
+        
         // Make the request using PUT method to match curl -T behavior
         xhr.open('PUT', uploadPath);
+        
+        // Add Authorization header if password is provided
+        if (usePassword && passwordInput.value) {
+            xhr.setRequestHeader('Authorization', passwordInput.value);
+        }
+        
         xhr.send(file);
     });
 }

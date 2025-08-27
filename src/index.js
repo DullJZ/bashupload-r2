@@ -113,6 +113,16 @@ export default {
 
       // 从 R2 获取文件
       if (fileName) {
+        // 检查密码保护
+        if (env.PASSWORD) {
+          const authHeader = request.headers.get('Authorization');
+          if (!authHeader || authHeader !== env.PASSWORD) {
+            return new Response('Unauthorized\n', { 
+              status: 401
+            });
+          }
+        }
+        
         try {
           const object = await env.R2_BUCKET.get(fileName);
           if (!object) {
@@ -161,6 +171,16 @@ export default {
     // 处理 PUT 请求（curl -T 使用 PUT）
     if (request.method !== 'PUT') {
       return new Response('Method Not Allowed\n', { status: 405 });
+    }
+
+    // 检查密码保护
+    if (env.PASSWORD) {
+      const authHeader = request.headers.get('Authorization');
+      if (!authHeader || authHeader !== env.PASSWORD) {
+        return new Response('Unauthorized\n', { 
+          status: 401
+        });
+      }
     }
 
     try {

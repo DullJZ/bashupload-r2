@@ -52,6 +52,7 @@ source ~/.bashrc
 - 隐私保护：文件在下载后自动删除
 - 安全的文件存储，仅限一次下载
 - 支持最大 5GB 的文件（自部署可调整）
+- 支持自部署设置密码
 
 **隐私注意：** 为了您的隐私和安全，文件在下载后会立即从我们的服务器上删除。每个文件只能下载一次。下载后请务必将文件保存在本地，因为链接在首次下载后将不再有效。
 
@@ -63,3 +64,25 @@ source ~/.bashrc
 其中，`MAX_UPLOAD_SIZE`单位为字节（默认为 5GB），`MAX_AGE`单位为秒（默认为 1小时），可以根据需要进行调整。
 
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
+
+`PASSWORD` 环境变量为上传、下载必须提供的密码。如果不需要密码保护，可以将其留空。
+
+## 密码保护
+
+要启用密码保护，请在 Cloudflare Worker 设置中设置 `PASSWORD` 环境变量。当设置 PASSWORD 后，上传和下载都需要在 Authorization 头中提供密码。
+
+使用 curl 的示例：
+```sh
+# 带密码上传
+curl -H "Authorization: yourpassword" bashupload.app -T file.txt
+
+# 带密码下载
+curl -H "Authorization: yourpassword" https://bashupload.app/yourfile.txt
+```
+
+设置含密码的alias别名：
+```sh
+echo "alias bashupload='curl -H \"Authorization: yourpassword\" bashupload.app -T'" >> ~/.bashrc
+echo "alias bashuploadshort='curl -H \"Authorization: yourpassword\" bashupload.app/short -T'" >> ~/.bashrc
+source ~/.bashrc
+```

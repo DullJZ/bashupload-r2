@@ -20,6 +20,7 @@ bucket_name = "bashupload"
 MAX_UPLOAD_SIZE = "5368709120"
 MAX_AGE = "3600"
 SHORT_URL_SERVICE = "https://suosuo.de/short"
+PASSWORD = ""
 
 # 静态文件
 [assets]
