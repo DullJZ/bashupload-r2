@@ -116,9 +116,28 @@ export default {
         // 检查密码保护
         if (env.PASSWORD) {
           const authHeader = request.headers.get('Authorization');
-          if (!authHeader || authHeader !== env.PASSWORD) {
+          let providedPassword = '';
+          
+          // 处理Basic认证格式 (Basic base64encode(username:password))
+          if (authHeader && authHeader.startsWith('Basic ')) {
+            try {
+              const base64Credentials = authHeader.split(' ')[1];
+              const credentials = atob(base64Credentials);
+              const [username, password] = credentials.split(':');
+              // 用户名可以为空，我们只关心密码
+              providedPassword = password || '';
+            } catch (e) {
+              console.error('Error parsing Basic auth:', e);
+            }
+          } else {
+            // 处理直接密码格式
+            providedPassword = authHeader || '';
+          }
+          
+          if (providedPassword !== env.PASSWORD) {
             return new Response('Unauthorized\n', { 
-              status: 401
+              status: 401,
+              headers: { 'WWW-Authenticate': 'Basic realm="Password Required"' }
             });
           }
         }
@@ -176,7 +195,25 @@ export default {
     // 检查密码保护
     if (env.PASSWORD) {
       const authHeader = request.headers.get('Authorization');
-      if (!authHeader || authHeader !== env.PASSWORD) {
+      let providedPassword = '';
+      
+      // 处理Basic认证格式 (Basic base64encode(username:password))
+      if (authHeader && authHeader.startsWith('Basic ')) {
+        try {
+          const base64Credentials = authHeader.split(' ')[1];
+          const credentials = atob(base64Credentials);
+          const [username, password] = credentials.split(':');
+          // 用户名可以为空，我们只关心密码
+          providedPassword = password || '';
+        } catch (e) {
+          console.error('Error parsing Basic auth:', e);
+        }
+      } else {
+        // 处理直接密码格式
+        providedPassword = authHeader || '';
+      }
+      
+      if (providedPassword !== env.PASSWORD) {
         return new Response('Unauthorized\n', { 
           status: 401
         });
