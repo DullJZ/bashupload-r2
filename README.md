@@ -66,6 +66,8 @@ Click the "Deploy to Cloudflare" button above to modify the configuration.
 
 `PASSWORD` environment variable is the password that must be provided for upload and download. If password protection is not needed, it can be left blank.
 
+The final step of deployment may show a deployment failure error because the default configuration uses `bashupload.app` as the domain. In fact, the project has already been deployed successfully. You just need to bind your own domain in the Worker project settings.
+
 ## Password Protection
 
 To enable password protection, set the `PASSWORD` environment variable in your Cloudflare Worker settings. When PASSWORD is set, both uploads and downloads will require the password to be provided in the Authorization header.

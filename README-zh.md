@@ -67,6 +67,8 @@ source ~/.bashrc
 
 `PASSWORD` 环境变量为上传、下载必须提供的密码。如果不需要密码保护，可以将其留空。
 
+编译部署最后一步可能会出现部署失败的错误，原因是默认使用了配置文件中的 bashupload.app 作为域名。事实上项目已经部署成功，在Worker项目设置中进行域名绑定即可。
+
 ## 密码保护
 
 要启用密码保护，请在 Cloudflare Worker 设置中设置 `PASSWORD` 环境变量。当设置 PASSWORD 后，上传和下载都需要在 Authorization 头中提供密码。
