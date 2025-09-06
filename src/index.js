@@ -35,6 +35,20 @@ export default {
               const fileInfo = await env.R2_BUCKET.head(object.key);
 
               if (fileInfo) {
+                // 检查文件是否有自定义的过期时间
+                const expirationTime = fileInfo.customMetadata?.expirationTime;
+                if (expirationTime) {
+                  const now = new Date().getTime();
+                  const expireAt = new Date(expirationTime).getTime();
+                  if (now > expireAt) {
+                    await env.R2_BUCKET.delete(object.key);
+                    console.log(`[Scheduled Task] Deleted expired file: ${object.key}, expiration: ${expirationTime}`);
+                    return true;
+                  }
+                  // 文件未过期，跳过后续的 MAX_AGE 检查
+                  return false;
+                }
+
                 // 获取文件上传时间
                 // 优先使用自定义元数据中的 uploadTime，如果没有则使用 uploaded 时间
                 const uploadTime = fileInfo.customMetadata?.uploadTime
@@ -88,7 +102,24 @@ export default {
         const userAgent = request.headers.get('user-agent') || '';
         if (userAgent.toLowerCase().includes('curl')) {
           // 如果是 curl，返回简单的文本说明
-          return new Response(`bashupload.app - 一次性文件分享服务\n\n使用方法 Usage:\n  curl bashupload.app -T file.txt          # 返回普通链接 / Normal URL\n  curl bashupload.app/short -T file.txt    # 返回短链接 / Short URL\n\n特性 Features:\n  • 文件只能下载一次 / Files can only be downloaded once\n  • 下载后自动删除 / Auto-delete after download\n  • 保护隐私安全 / Privacy protection\n`, {
+          return new Response(`bashupload.app - 一次性文件分享服务 | One-time File Sharing Service
+
+使用方法 Usage:
+  curl bashupload.app -T file.txt                    # 返回普通链接 / Normal URL
+  curl bashupload.app/short -T file.txt              # 返回短链接 / Short URL
+  curl -H "X-Expiration-Seconds: 3600" bashupload.app -T file.txt   # 设置有效期 / Set expiration time
+
+特性 Features:
+  • 文件只能下载一次 / Files can only be downloaded once (默认 default)
+  • 可以设置有效期 / Can set expiration time for multiple downloads
+  • 下载后自动删除 / Auto-delete after download or expiration
+  • 保护隐私安全 / Privacy protection
+
+有效期示例 Expiration Examples:
+  • 3600 秒 (1小时) / 3600s (1 hour)
+  • 7200 秒 (2小时) / 7200s (2 hours)
+  • 86400 秒 (24小时) / 86400s (24 hours)
+`, {
             status: 200,
             headers: { 'Content-Type': 'text/plain; charset=utf-8' },
           });
@@ -156,26 +187,53 @@ export default {
           const contentType = mime.getType(fileName) || 'application/octet-stream';
           headers.set('Content-Type', contentType);
 
+          // 检查文件元数据，确定是否是有效期模式
+          const fileInfo = await env.R2_BUCKET.head(fileName);
+          const isOneTime = !fileInfo?.customMetadata?.oneTime || fileInfo.customMetadata.oneTime === 'true';
+          const expirationTime = fileInfo?.customMetadata?.expirationTime;
+
+          // 如果有过期时间，检查是否已经过期
+          if (expirationTime) {
+            const now = new Date().getTime();
+            const expireAt = new Date(expirationTime).getTime();
+            if (now > expireAt) {
+              // 文件已过期，删除并返回404
+              await env.R2_BUCKET.delete(fileName);
+              console.log(`[Expired Download] Deleted expired file: ${fileName}`);
+              return new Response('File not found (expired)\n', { status: 404 });
+            }
+          }
+
           // 先获取文件内容
           const body = object.body;
 
-          // 一次性下载：下载后立即删除文件
-          // 使用 ctx.waitUntil 确保删除操作在响应发送后执行
-          ctx.waitUntil(
-            (async () => {
-              try {
-                // 小延迟，确保文件先被发送
-                await new Promise(resolve => setTimeout(resolve, 100));
-                await env.R2_BUCKET.delete(fileName);
-                console.log(`[One-Time Download] Deleted file: ${fileName}`);
-              } catch (deleteError) {
-                console.error(`[One-Time Download] Failed to delete file ${fileName}:`, deleteError);
-              }
-            })()
-          );
+          // 只有在一次性下载模式下才删除文件
+          if (isOneTime) {
+            // 一次性下载：下载后立即删除文件
+            // 使用 ctx.waitUntil 确保删除操作在响应发送后执行
+            ctx.waitUntil(
+              (async () => {
+                try {
+                  // 小延迟，确保文件先被发送
+                  await new Promise(resolve => setTimeout(resolve, 100));
+                  await env.R2_BUCKET.delete(fileName);
+                  console.log(`[One-Time Download] Deleted file: ${fileName}`);
+                } catch (deleteError) {
+                  console.error(`[One-Time Download] Failed to delete file ${fileName}:`, deleteError);
+                }
+              })()
+            );
 
-          // 添加响应头标识这是一次性下载
-          headers.set('X-One-Time-Download', 'true');
+            // 添加响应头标识这是一次性下载
+            headers.set('X-One-Time-Download', 'true');
+          } else {
+            // 有效期模式
+            headers.set('X-Expiration-Download', 'true');
+            if (expirationTime) {
+              headers.set('X-Expiration-Time', expirationTime);
+            }
+          }
+
           headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
           headers.set('Pragma', 'no-cache');
           headers.set('Expires', '0');
@@ -237,6 +295,11 @@ export default {
         }
       }
 
+      // 获取有效期参数（秒）
+      const expirationSeconds = request.headers.get('X-Expiration-Seconds');
+      const hasExpiration = expirationSeconds && !isNaN(parseInt(expirationSeconds, 10)) && parseInt(expirationSeconds, 10) > 0;
+      const expirationTime = hasExpiration ? parseInt(expirationSeconds, 10) : null;
+
       // 生成随机文件名
       const randomId = generateRandomId();
       const contentType = request.headers.get('content-type') || 'application/octet-stream';
@@ -247,15 +310,22 @@ export default {
 
       // 使用流式上传 - 直接传递 request.body 到 R2
       // 这样不会将整个文件加载到 Worker 内存中
+      const customMetadata = {
+        oneTime: hasExpiration ? 'false' : 'true',
+        uploadTime: new Date().toISOString()
+      };
+
+      // 如果有有效期，添加到元数据中
+      if (hasExpiration) {
+        customMetadata.expirationTime = new Date(Date.now() + expirationTime * 1000).toISOString();
+        customMetadata.expirationSeconds = expirationTime.toString();
+      }
+
       const uploadResult = await env.R2_BUCKET.put(fileName, request.body, {
         httpMetadata: {
           contentType: contentType,
         },
-        // 添加自定义元数据，标记为一次性文件
-        customMetadata: {
-          oneTime: 'true',
-          uploadTime: new Date().toISOString()
-        },
+        customMetadata: customMetadata,
       });
 
       // 返回上传成功的 URL
@@ -296,14 +366,24 @@ export default {
         }
       }
 
-      // 返回简单的文本响应，提醒用户这是一次性下载
-      const responseText = `\n\n${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
+      // 根据是否有有效期返回不同的文本提示
+      let responseText;
+      if (hasExpiration) {
+        const expirationHours = Math.floor(expirationTime / 3600);
+        const expirationMinutes = Math.floor((expirationTime % 3600) / 60);
+        const expirationString = expirationHours > 0 
+          ? `${expirationHours}小时${expirationMinutes > 0 ? expirationMinutes + '分钟' : ''}`
+          : `${expirationMinutes}分钟`;
+        responseText = `\n\n${fileUrl}\n\n🕐 注意：此文件将在 ${expirationString} 后过期，期间可以多次下载。\n   Note: This file will expire after ${expirationString} and can be downloaded multiple times.\n`;
+      } else {
+        responseText = `\n\n${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
+      }
 
       return new Response(responseText, {
         status: 200,
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'X-One-Time-Upload': 'true',
+          'X-One-Time-Upload': hasExpiration ? 'false' : 'true',
         },
       });
     } catch (e) {

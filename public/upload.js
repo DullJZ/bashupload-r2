@@ -68,6 +68,60 @@ document.addEventListener('DOMContentLoaded', function() {
             this.style.boxShadow = 'none';
         }
     });
+
+    // Set up expiration checkbox functionality
+    const useExpirationCheckbox = document.getElementById('useExpiration');
+    const expirationContainer = document.getElementById('expirationContainer');
+    
+    useExpirationCheckbox.addEventListener('change', function() {
+        if (this.checked) {
+            expirationContainer.style.display = 'block';
+        } else {
+            expirationContainer.style.display = 'none';
+        }
+    });
+
+    // Set up expiration button functionality
+    const setExpirationBtn = document.getElementById('setExpirationBtn');
+    const expirationResult = document.getElementById('expirationResult');
+    const expirationInput = document.getElementById('expirationInput');
+    const expirationUnit = document.getElementById('expirationUnit');
+    
+    setExpirationBtn.addEventListener('click', function() {
+        const value = parseInt(expirationInput.value);
+        const unit = expirationUnit.value;
+        
+        if (value > 0) {
+            // Store expiration time in seconds in a global/alternative way
+            let seconds = 0;
+            switch(unit) {
+                case 'seconds':
+                    seconds = value;
+                    break;
+                case 'minutes':
+                    seconds = value * 60;
+                    break;
+                case 'hours':
+                    seconds = value * 3600;
+                    break;
+                case 'days':
+                    seconds = value * 86400;
+                    break;
+            }
+            
+            // Store in a data attribute for reliable access
+            setExpirationBtn.setAttribute('data-expiration-seconds', seconds);
+            
+            // Show success message
+            expirationResult.style.display = 'block';
+            setTimeout(() => {
+                expirationResult.style.display = 'none';
+            }, 2000);
+        }
+    });
+
+    // Update expiration placeholder based on language
+    updateExpirationPlaceholder();
 });
 
 function updatePasswordPlaceholder() {
@@ -85,6 +139,32 @@ function updatePasswordPlaceholder() {
             const zhText = noticeText.getAttribute('data-zh');
             noticeText.textContent = currentLang === 'zh' ? zhText : enText;
         }
+    }
+}
+
+function updateExpirationPlaceholder() {
+    const expirationInput = document.getElementById('expirationInput');
+    const enPlaceholder = expirationInput.getAttribute('data-en-placeholder');
+    const zhPlaceholder = expirationInput.getAttribute('data-zh-placeholder');
+    expirationInput.placeholder = currentLang === 'zh' ? zhPlaceholder : enPlaceholder;
+    
+    // Update expiration units text
+    const expirationUnit = document.getElementById('expirationUnit');
+    const optionSeconds = expirationUnit.querySelector('option[value="seconds"]');
+    const optionMinutes = expirationUnit.querySelector('option[value="minutes"]');
+    const optionHours = expirationUnit.querySelector('option[value="hours"]');
+    const optionDays = expirationUnit.querySelector('option[value="days"]');
+    
+    if (currentLang === 'zh') {
+        optionSeconds.textContent = '秒';
+        optionMinutes.textContent = '分钟';
+        optionHours.textContent = '小时';
+        optionDays.textContent = '天';
+    } else {
+        optionSeconds.textContent = 'seconds';
+        optionMinutes.textContent = 'minutes';
+        optionHours.textContent = 'hours';
+        optionDays.textContent = 'days';
     }
 }
 
@@ -191,14 +271,54 @@ function addFileToList(fileName, url, usePassword = false) {
     const fileItem = document.createElement('div');
     fileItem.className = 'file-item';
     
-    // 添加一次性下载警告
+    // 检查是否设置了有效期
+    const useExpiration = document.getElementById('useExpiration')?.checked;
+    
+    // 添加下载警告（根据是否有有效期显示不同的消息）
     const warningText = document.createElement('div');
     warningText.style.color = '#ff6b35';
     warningText.style.fontSize = '12px';
     warningText.style.marginBottom = '5px';
-    warningText.innerHTML = currentLang === 'zh' 
-        ? '⚠️ 注意：此链接只能使用一次，下载后文件将自动删除' 
-        : '⚠️ Note: This link can only be used once, file will be deleted after download';
+    if (useExpiration) {
+        const setExpirationBtn = document.getElementById('setExpirationBtn');
+        const expirationSeconds = setExpirationBtn.getAttribute('data-expiration-seconds');
+        
+        if (expirationSeconds) {
+            // Convert seconds to human readable format
+            const seconds = parseInt(expirationSeconds);
+            let value = seconds;
+            let unit = 'seconds';
+            
+            if (seconds % 86400 === 0) {
+                value = seconds / 86400;
+                unit = 'days';
+            } else if (seconds % 3600 === 0) {
+                value = seconds / 3600;
+                unit = 'hours';
+            } else if (seconds % 60 === 0) {
+                value = seconds / 60;
+                unit = 'minutes';
+            }
+            
+            let expirationString = currentLang === 'zh' 
+                ? `${value}${unit}` 
+                : `${value} ${unit}`;
+            
+            warningText.innerHTML = currentLang === 'zh' 
+                ? `🕐 注意：此文件将在 ${expirationString} 后过期，期间可多次下载` 
+                : `🕐 Note: This file will expire after ${expirationString} and can be downloaded multiple times`;
+        } else {
+            // Default to 1 hour if no specific time was set
+            let expirationString = currentLang === 'zh' ? '1小时' : '1 hour';
+            warningText.innerHTML = currentLang === 'zh' 
+                ? `🕐 注意：此文件将在 ${expirationString} 后过期，期间可多次下载` 
+                : `🕐 Note: This file will expire after ${expirationString} and can be downloaded multiple times`;
+        }
+    } else {
+        warningText.innerHTML = currentLang === 'zh' 
+            ? '⚠️ 注意：此链接只能使用一次，下载后文件将自动删除' 
+            : '⚠️ Note: This link can only be used once, file will be deleted after download';
+    }
     
     // 添加密码保护警告
     let passwordWarning = null;
@@ -254,9 +374,47 @@ async function uploadSimpleFile(file, maxRetries = 3) {
                 const responseUrl = response.responseText.trim();
                 if (responseUrl.startsWith('http')) {
                     hideProgress();
-                    const successMsg = currentLang === 'zh' 
-                        ? `成功上传 ${file.name}！(一次性下载)` 
-                        : `Successfully uploaded ${file.name}! (One-time download)`;
+                    // 根据是否设置了有效期显示不同的成功消息
+                    const useExpiration = document.getElementById('useExpiration')?.checked;
+                    let successMsg;
+                    if (useExpiration) {
+                        const setExpirationBtn = document.getElementById('setExpirationBtn');
+                        const expirationSeconds = setExpirationBtn.getAttribute('data-expiration-seconds');
+                        
+                        if (expirationSeconds) {
+                            // Convert seconds to human readable format
+                            const seconds = parseInt(expirationSeconds);
+                            let value = seconds;
+                            let unit = 'seconds';
+                            
+                            if (seconds % 86400 === 0) {
+                                value = seconds / 86400;
+                                unit = 'days';
+                            } else if (seconds % 3600 === 0) {
+                                value = seconds / 3600;
+                                unit = 'hours';
+                            } else if (seconds % 60 === 0) {
+                                value = seconds / 60;
+                                unit = 'minutes';
+                            }
+                            
+                            let expirationString = currentLang === 'zh' 
+                                ? `${value}${unit}` 
+                                : `${value} ${unit}`;
+                            
+                            successMsg = currentLang === 'zh' 
+                                ? `成功上传 ${file.name}！(有效期: ${expirationString})` 
+                                : `Successfully uploaded ${file.name}! (Expiration: ${expirationString})`;
+                        } else {
+                            successMsg = currentLang === 'zh' 
+                                ? `成功上传 ${file.name}！(默认有效期: 1小时)` 
+                                : `Successfully uploaded ${file.name}! (Default expiration: 1 hour)`;
+                        }
+                    } else {
+                        successMsg = currentLang === 'zh' 
+                            ? `成功上传 ${file.name}！(一次性下载)` 
+                            : `Successfully uploaded ${file.name}! (One-time download)`;
+                    }
                     showStatus(successMsg, 'success');
                     // 提取纯URL（去除警告信息）
                     const cleanUrl = responseUrl.split('\n')[0];
@@ -337,12 +495,29 @@ function uploadWithProgress(file, onProgress) {
         const usePassword = document.getElementById('usePassword')?.checked;
         const passwordInput = document.getElementById('passwordInput');
         
+        // Check if expiration is set
+        const useExpiration = document.getElementById('useExpiration')?.checked;
+        
         // Make the request using PUT method to match curl -T behavior
         xhr.open('PUT', uploadPath);
         
         // Add Authorization header if password is provided
         if (usePassword && passwordInput.value) {
             xhr.setRequestHeader('Authorization', passwordInput.value);
+        }
+        
+        // Add expiration header if expiration is set
+        if (useExpiration) {
+            const setExpirationBtn = document.getElementById('setExpirationBtn');
+            let expirationSeconds = setExpirationBtn.getAttribute('data-expiration-seconds');
+            
+            // If no expiration time was explicitly set, use default (1 hour)
+            if (!expirationSeconds) {
+                // Default to 1 hour (3600 seconds)
+                expirationSeconds = '3600';
+            }
+            
+            xhr.setRequestHeader('X-Expiration-Seconds', expirationSeconds);
         }
         
         xhr.send(file);
