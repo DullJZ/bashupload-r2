@@ -96,6 +96,25 @@ export default {
 
     // 处理 GET 请求
     if (request.method === 'GET') {
+      // 获取服务端配置信息的API端点
+      if (pathname === '/api/config') {
+        const config = {
+          maxAgeForMultiDownload: parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10),
+          maxUploadSize: parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10),
+          maxAge: parseInt(env.MAX_AGE || '3600', 10)
+        };
+        
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET',
+            'Access-Control-Allow-Headers': 'Content-Type'
+          }
+        });
+      }
+
       // 根路径处理
       if (pathname === '/' || pathname === '') {
         // 检查 User-Agent 以确定是浏览器还是 curl

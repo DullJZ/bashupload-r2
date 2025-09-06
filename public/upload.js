@@ -1,6 +1,57 @@
 const UPLOAD_URL = window.location.origin;
 let uploadedFiles = [];
 let currentLang = 'en';
+let serverConfig = null;
+
+// Fetch server configuration
+async function fetchServerConfig() {
+    try {
+        const response = await fetch(`${UPLOAD_URL}/api/config`);
+        if (response.ok) {
+            serverConfig = await response.json();
+            updateMaxExpirationDisplay();
+        }
+    } catch (error) {
+        console.error('Failed to fetch server configuration:', error);
+    }
+}
+
+// Update maximum expiration time display
+function updateMaxExpirationDisplay() {
+    if (!serverConfig || !serverConfig.maxAgeForMultiDownload) return;
+    
+    const maxExpirationSeconds = serverConfig.maxAgeForMultiDownload;
+    let value = maxExpirationSeconds;
+    let unit = 'seconds';
+    let unitZh = '秒';
+    
+    if (maxExpirationSeconds % 86400 === 0) {
+        value = maxExpirationSeconds / 86400;
+        unit = 'days';
+        unitZh = '天';
+    } else if (maxExpirationSeconds % 3600 === 0) {
+        value = maxExpirationSeconds / 3600;
+        unit = 'hours';
+        unitZh = '小时';
+    } else if (maxExpirationSeconds % 60 === 0) {
+        value = maxExpirationSeconds / 60;
+        unit = 'minutes';
+        unitZh = '分钟';
+    }
+    
+    const maxExpirationInfo = document.getElementById('maxExpirationInfo');
+    if (maxExpirationInfo) {
+        const langText = maxExpirationInfo.querySelector('.lang-text');
+        if (langText) {
+            const maxTextEn = `💡 Maximum allowed: ${value} ${unit}`;
+            const maxTextZh = `💡 最大允许值: ${value}${unitZh}`;
+            
+            langText.setAttribute('data-en', maxTextEn);
+            langText.setAttribute('data-zh', maxTextZh);
+            langText.textContent = currentLang === 'zh' ? maxTextZh : maxTextEn;
+        }
+    }
+}
 
 // Language detection and switching
 function detectLanguage() {
@@ -33,12 +84,17 @@ function switchLanguage(lang) {
     if (passwordContainer.style.display !== 'none') {
         updatePasswordPlaceholder();
     }
+    // Update max expiration display after language switch
+    updateMaxExpirationDisplay();
 }
 
 // Initialize language on page load
 document.addEventListener('DOMContentLoaded', function() {
     currentLang = detectLanguage();
     switchLanguage(currentLang);
+    
+    // Fetch server configuration
+    fetchServerConfig();
     
     // Set up password checkbox functionality
     const usePasswordCheckbox = document.getElementById('usePassword');
