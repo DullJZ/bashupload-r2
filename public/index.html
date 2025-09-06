@@ -38,7 +38,10 @@
                 <div class="upload-icon">📁</div>
                 <h3 class="lang-text" data-en="Drag & Drop files here" data-zh="拖放文件到这里">Drag & Drop files here</h3>
                 <p class="upload-text lang-text" data-en="or click to select files" data-zh="或点击选择文件">or click to select files</p>
-                <button class="upload-button lang-text" onclick="document.getElementById('fileInput').click()" data-en="Choose Files (Max 5GB)" data-zh="选择文件 (最大 5GB)">Choose Files (Max 5GB)</button>
+                <button class="upload-button lang-text" onclick="document.getElementById('fileInput').click()" data-en="Choose Files" data-zh="选择文件">Choose Files</button>
+                <div id="maxFileSizeInfo" style="margin-top: 5px; font-size: 11px; color: #666;">
+                    <span class="lang-text" data-en="Max: --" data-zh="最大: --">Max: --</span>
+                </div>
                 <input type="file" id="fileInput" multiple onchange="handleFileSelect(event)">
                 <div class="upload-options">
                     <label class="checkbox-label">
@@ -125,7 +128,7 @@
                 <div class="feature lang-text" data-en="No registration required" data-zh="无需注册">No registration required</div>
                 <div class="feature lang-text" data-en="Privacy-focused: Random filenames" data-zh="隐私保护：随机文件名">Privacy-focused: Random filenames</div>
                 <div class="feature lang-text" data-en="Secure temporary storage with Cloudflare R2" data-zh="使用 Cloudflare R2 安全临时存储">Secure temporary storage with Cloudflare R2</div>
-                <div class="feature lang-text" data-en="Supports files up to 5GB in size" data-zh="支持最大 5GB 的文件">Supports files up to 5GB in size</div>
+                <div class="feature lang-text" id="maxFileSizeFeature" data-en="Supports files up to -- in size" data-zh="支持最大 -- 的文件">Supports files up to -- in size</div>
                 <div class="feature lang-text" data-en="Optional password protection for uploads" data-zh="可选的文件上传密码保护">Optional password protection for uploads</div>
             </div>
         </div>

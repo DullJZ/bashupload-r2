@@ -3,6 +3,15 @@ let uploadedFiles = [];
 let currentLang = 'en';
 let serverConfig = null;
 
+// 格式化字节数为可读字符串
+function formatBytes(bytes) {
+    if (bytes === 0) return '0B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + sizes[i];
+}
+
 // Fetch server configuration
 async function fetchServerConfig() {
     try {
@@ -10,6 +19,7 @@ async function fetchServerConfig() {
         if (response.ok) {
             serverConfig = await response.json();
             updateMaxExpirationDisplay();
+            updateMaxFileSizeDisplay();
         }
     } catch (error) {
         console.error('Failed to fetch server configuration:', error);
@@ -53,6 +63,39 @@ function updateMaxExpirationDisplay() {
     }
 }
 
+// Update maximum file size display
+function updateMaxFileSizeDisplay() {
+    if (!serverConfig || !serverConfig.maxUploadSize) return;
+    
+    const maxSizeBytes = serverConfig.maxUploadSize;
+    const maxSizeText = formatBytes(maxSizeBytes);
+    
+    // Update upload area max size display
+    const maxFileSizeInfo = document.getElementById('maxFileSizeInfo');
+    if (maxFileSizeInfo) {
+        const langText = maxFileSizeInfo.querySelector('.lang-text');
+        if (langText) {
+            const maxTextEn = `Max: ${maxSizeText}`;
+            const maxTextZh = `最大: ${maxSizeText}`;
+            
+            langText.setAttribute('data-en', maxTextEn);
+            langText.setAttribute('data-zh', maxTextZh);
+            langText.textContent = currentLang === 'zh' ? maxTextZh : maxTextEn;
+        }
+    }
+    
+    // Update features section max file size display
+    const maxFileSizeFeature = document.getElementById('maxFileSizeFeature');
+    if (maxFileSizeFeature) {
+        const featureTextEn = `Supports files up to ${maxSizeText} in size`;
+        const featureTextZh = `支持最大 ${maxSizeText} 的文件`;
+        
+        maxFileSizeFeature.setAttribute('data-en', featureTextEn);
+        maxFileSizeFeature.setAttribute('data-zh', featureTextZh);
+        maxFileSizeFeature.textContent = currentLang === 'zh' ? featureTextZh : featureTextEn;
+    }
+}
+
 // Language detection and switching
 function detectLanguage() {
     const browserLang = navigator.language || navigator.userLanguage;
@@ -86,6 +129,8 @@ function switchLanguage(lang) {
     }
     // Update max expiration display after language switch
     updateMaxExpirationDisplay();
+    // Update max file size display after language switch
+    updateMaxFileSizeDisplay();
 }
 
 // Initialize language on page load
@@ -298,12 +343,13 @@ function hideProgress() {
 // Simplified upload function - our Worker handles everything with a single PUT request
 
 async function uploadFile(file) {
-    // Check file size limit (100MB for Worker free tier)
-    const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
-    if (file.size > MAX_FILE_SIZE) {
+    // Check file size limit using server configuration
+    const maxFileSize = serverConfig?.maxUploadSize || (5 * 1024 * 1024 * 1024); // Default 5GB if config not loaded
+    if (file.size > maxFileSize) {
+        const maxSizeText = formatBytes(maxFileSize);
         const errorMsg = currentLang === 'zh' 
-            ? `文件 ${file.name} 超过 5GB 大小限制。` 
-            : `File ${file.name} exceeds 5GB size limit.`;
+            ? `文件 ${file.name} 超过 ${maxSizeText} 大小限制。` 
+            : `File ${file.name} exceeds ${maxSizeText} size limit.`;
         showStatus(errorMsg, 'error');
         return;
     }
