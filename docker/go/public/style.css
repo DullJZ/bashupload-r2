@@ -1,0 +1,292 @@
+/* BashUpload 样式，供 index_zh.html 和 index_en.html 共用 */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 40px 20px;
+    background-color: #f5f5f5;
+    color: #333;
+}
+.container {
+    background-color: white;
+    padding: 40px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+h1 {
+    color: #2c3e50;
+    margin-bottom: 10px;
+}
+.subtitle {
+    color: #7f8c8d;
+    margin-bottom: 20px;
+}
+.action-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.github-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background-color: #24292e;
+    color: white;
+    text-decoration: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+.github-link:hover {
+    background-color: #2c3137;
+}
+.github-icon {
+    display: inline-block;
+    vertical-align: middle;
+}
+.star-message {
+    color: #586069;
+    font-size: 14px;
+    text-align: center;
+    margin: 10px 0 15px 0;
+    font-style: italic;
+}
+.code-block {
+    background-color: #2c3e50;
+    color: #ecf0f1;
+    padding: 20px;
+    border-radius: 4px;
+    font-family: "Courier New", Courier, monospace;
+    margin: 20px 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.features {
+    margin: 30px 0;
+}
+.feature {
+    margin: 15px 0;
+    padding-left: 25px;
+    position: relative;
+}
+.feature:before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    color: #27ae60;
+    font-weight: bold;
+}
+.section {
+    margin: 30px 0;
+}
+h2 {
+    color: #34495e;
+    margin-bottom: 15px;
+}
+.note {
+    background-color: #e8f4f8;
+    border-left: 4px solid #3498db;
+    padding: 15px;
+    margin: 20px 0;
+}
+.upload-container {
+    background-color: #f8f9fa;
+    border: 2px dashed #dee2e6;
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    margin: 30px 0;
+    transition: all 0.3s ease;
+}
+.upload-container.dragging {
+    background-color: #e8f4f8;
+    border-color: #3498db;
+}
+.upload-icon {
+    font-size: 48px;
+    color: #6c757d;
+    margin-bottom: 20px;
+}
+.upload-text {
+    color: #495057;
+    margin-bottom: 20px;
+}
+.upload-button {
+    background-color: #3498db;
+    color: white;
+    border: none;
+    padding: 10px 30px;
+    border-radius: 4px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+.upload-button:hover {
+    background-color: #2980b9;
+}
+#fileInput {
+    display: none;
+}
+.upload-status {
+    margin-top: 20px;
+    padding: 15px;
+    border-radius: 4px;
+    display: none;
+}
+.upload-status.success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+.upload-status.error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+.upload-status.uploading {
+    background-color: #cce5ff;
+    color: #004085;
+    border: 1px solid #b8daff;
+}
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background-color: #e9ecef;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 10px;
+    display: none;
+}
+.progress-fill {
+    height: 100%;
+    background-color: #3498db;
+    width: 0%;
+    transition: width 0.3s ease;
+}
+.file-list {
+    margin-top: 20px;
+    text-align: left;
+}
+.file-item {
+    background-color: #f8f9fa;
+    padding: 10px;
+    margin: 5px 0;
+    border-radius: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.file-url {
+    word-break: break-all;
+    margin-right: 10px;
+}
+.copy-button {
+    background-color: #6c757d;
+    color: white;
+    border: none;
+    padding: 5px 15px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    white-space: nowrap;
+}
+.copy-button:hover {
+    background-color: #5a6268;
+}
+.upload-options {
+    margin-top: 20px;
+    text-align: left;
+    display: flex;
+    justify-content: center;
+}
+.checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    position: relative;
+    padding: 8px 12px;
+    background-color: #fff;
+    border-radius: 6px;
+    transition: background-color 0.2s;
+}
+.checkbox-label:hover {
+    background-color: #f0f0f0;
+}
+.checkbox-input {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+.tooltip-icon {
+    font-size: 14px;
+    color: #6c757d;
+    cursor: help;
+}
+.tooltip-text {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: #333;
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.3s, visibility 0.3s;
+    z-index: 1000;
+    margin-bottom: 5px;
+}
+.checkbox-label:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+}
+.password-input {
+    width: 100%;
+    max-width: 300px;
+    padding: 10px 15px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    box-sizing: border-box;
+    transition: border-color 0.3s ease;
+}
+.password-input:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.1);
+}
+.expiration-input {
+    width: 80px;
+    padding: 5px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: border-color 0.3s ease;
+}
+.expiration-input:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.1);
+}
+.set-expiration-btn {
+    padding: 5px 10px;
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.3s ease;
+}
+.set-expiration-btn:hover {
+    background: #218838;
+}

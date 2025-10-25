@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BashUpload - 一次性文件分享服务 | One-Time File Sharing</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>BashUpload</h1>
+        <p class="subtitle lang-text" data-en="One-time file sharing service for the command line" data-zh="命令行一次性文件分享服务">One-time file sharing service for the command line</p>
+        
+        <div class="action-buttons">
+            <a href="https://github.com/DullJZ/bashupload-r2" target="_blank" class="github-link">
+                <svg class="github-icon" viewBox="0 0 24 24" width="24" height="24">
+                    <path fill="currentColor" d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                </svg>
+                <span>GitHub</span>
+            </a>
+            <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/DullJZ/bashupload-r2" target="_blank">
+                <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare Workers"/>
+            </a>
+        </div>
+        <p class="star-message lang-text" data-en="If you find this useful, please give my project a ⭐ Star on GitHub!" data-zh="如果觉得好用的话，欢迎给我的项目点个 ⭐ Star！">If you find this useful, please give my project a ⭐ Star on GitHub!</p>
+        <p style="color: #ff6b35; font-weight: bold; margin-top: 10px;">
+            <span class="lang-text" data-en="⚠️ Files can only be downloaded once, unless an expiration time is set" data-zh="⚠️ 文件只能下载一次，除非设置了有效期">⚠️ Files can only be downloaded once, unless an expiration time is set</span>
+        </p>
+        
+        <div class="section">
+            <h2 class="lang-text" data-en="Quick Start" data-zh="快速开始">Quick Start</h2>
+            <div class="code-block">$ curl bashupload.app -T file.txt</div>
+        </div>
+
+        <div class="section">
+            <h2 class="lang-text" data-en="Browser Upload" data-zh="浏览器上传">Browser Upload</h2>
+            <div class="upload-container" id="uploadContainer">
+                <div class="upload-icon">📁</div>
+                <h3 class="lang-text" data-en="Drag & Drop files here" data-zh="拖放文件到这里">Drag & Drop files here</h3>
+                <p class="upload-text lang-text" data-en="or click to select files" data-zh="或点击选择文件">or click to select files</p>
+                <button class="upload-button lang-text" onclick="document.getElementById('fileInput').click()" data-en="Choose Files" data-zh="选择文件">Choose Files</button>
+                <div id="maxFileSizeInfo" style="margin-top: 5px; font-size: 11px; color: #666;">
+                    <span class="lang-text" data-en="Max: --" data-zh="最大: --">Max: --</span>
+                </div>
+                <input type="file" id="fileInput" multiple onchange="handleFileSelect(event)">
+                <div class="upload-options">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="useShortUrl" class="checkbox-input">
+                        <span class="lang-text" data-en="Generate short URL" data-zh="生成短网址">Generate short URL</span>
+                        <span class="tooltip-icon">ℹ️</span>
+                        <span class="tooltip-text lang-text" 
+                              data-en="Generate a shorter URL for easier sharing" 
+                              data-zh="生成更短的网址，方便分享">Generate a shorter URL for easier sharing</span>
+                    </label>
+                    <label class="checkbox-label" style="margin-left: 15px;">
+                        <input type="checkbox" id="usePassword" class="checkbox-input">
+                        <span class="lang-text" data-en="Use password protection" data-zh="使用密码保护">Use password protection</span>
+                        <span class="tooltip-icon">ℹ️</span>
+                        <span class="tooltip-text lang-text" 
+                              data-en="Enter the server password to protect your upload" 
+                              data-zh="输入服务器密码以保护您的上传文件">Enter the server password to protect your upload</span>
+                    </label>
+                </div>
+                <div class="upload-options" style="margin-top: 15px;">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="useExpiration" class="checkbox-input">
+                        <span class="lang-text" data-en="Set expiration time" data-zh="设置有效期">Set expiration time</span>
+                        <span class="tooltip-icon">ℹ️</span>
+                        <span class="tooltip-text lang-text" 
+                              data-en="File will be available for multiple downloads until expiration time" 
+                              data-zh="文件在有效期内可多次下载，到期自动删除">File will be available for multiple downloads until expiration time</span>
+                    </label>
+                    <div id="expirationContainer" style="display: none; margin-top: 10px; margin-left: 20px;">
+                        <input type="number" id="expirationInput" 
+                               class="expiration-input" 
+                               placeholder="Expiration value" 
+                               data-en-placeholder="Expiration value"
+                               data-zh-placeholder="有效期数值"
+                               min="1" 
+                               value="1"
+                               style="width: 80px; padding: 5px; border: 1px solid #ccc; border-radius: 4px; margin-right: 8px;">
+                        <select id="expirationUnit" style="padding: 5px; border: 1px solid #ccc; border-radius: 4px; margin-right: 8px;">
+                            <option value="seconds">秒</option>
+                            <option value="minutes">分钟</option>
+                            <option value="hours">小时</option>
+                            <option value="days">天</option>
+                        </select>
+                        <button id="setExpirationBtn" class="set-expiration-btn" style="padding: 5px 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            <span class="lang-text" data-en="Set" data-zh="设置">Set</span>
+                        </button>
+                        <div id="expirationResult" style="margin-top: 5px; font-size: 12px; color: #28a745; display: none;">
+                            <span class="lang-text" data-en="✓ Expiration time set" data-zh="✓ 有效期已设置">✓ Expiration time set</span>
+                        </div>
+                        <div id="maxExpirationInfo" style="margin-top: 5px; font-size: 11px; color: #666;">
+                            <span class="lang-text" data-en="💡 Maximum allowed: --" data-zh="💡 最大允许值: --">💡 Maximum allowed: --</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="passwordContainer" style="display: none; margin-top: 15px;">
+                    <input type="password" id="passwordInput" 
+                           class="password-input" 
+                           placeholder="Enter server password" 
+                           data-en-placeholder="Enter server password"
+                           data-zh-placeholder="输入服务器密码">
+                    <div id="passwordNotice" style="margin-top: 8px; font-size: 12px; color: #666;">
+                        <span class="lang-text" data-en="⚠️ Important: The password must match the server's PASSWORD environment variable" data-zh="⚠️ 重要：密码必须与服务器的 PASSWORD 环境变量相同">⚠️ Important: The password must match the server's PASSWORD environment variable</span>
+                    </div>
+                </div>
+            </div>
+            <div class="upload-status" id="uploadStatus"></div>
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="file-list" id="fileList"></div>
+        </div>
+
+        <div class="section">
+            <h2 class="lang-text" data-en="Features" data-zh="特征">Features</h2>
+            <div class="features">
+                <div class="feature" style="color: #ff6b35; font-weight: bold;">
+                    <span class="lang-text" data-en="🔐 One-time download: Files are deleted after first access (unless expiration is set)" data-zh="🔐 一次性下载：文件在首次访问后删除（除非设置了有效期）">🔐 One-time download: Files are deleted after first access (unless expiration is set)</span>
+                </div>
+                <div class="feature" style="color: #ff6b35; font-weight: bold;">
+                    <span class="lang-text" data-en="🛡️ Maximum privacy: Files automatically deleted after expiration" data-zh="🛡️ 最大隐私保护：文件在有效期后自动删除">🛡️ Maximum privacy: Files automatically deleted after expiration</span>
+                </div>
+                <div class="feature lang-text" data-en="Simple command-line interface" data-zh="简单的命令行接口">Simple command-line interface</div>
+                <div class="feature lang-text" data-en="Browser-based drag & drop upload" data-zh="浏览器拖放上传">Browser-based drag & drop upload</div>
+                <div class="feature lang-text" data-en="No registration required" data-zh="无需注册">No registration required</div>
+                <div class="feature lang-text" data-en="Privacy-focused: Random filenames" data-zh="隐私保护：随机文件名">Privacy-focused: Random filenames</div>
+                <div class="feature lang-text" data-en="Secure temporary storage with Cloudflare R2" data-zh="使用 Cloudflare R2 安全临时存储">Secure temporary storage with Cloudflare R2</div>
+                <div class="feature lang-text" id="maxFileSizeFeature" data-en="Supports files up to -- in size" data-zh="支持最大 -- 的文件">Supports files up to -- in size</div>
+                <div class="feature lang-text" data-en="Optional password protection for uploads" data-zh="可选的文件上传密码保护">Optional password protection for uploads</div>
+            </div>
+        </div>
+
+
+        <div class="section">
+            <h2 class="lang-text" data-en="How It Works" data-zh="工作原理">How It Works</h2>
+            <ol>
+                <li class="lang-text" data-en="Use curl with the -T flag to upload your file" data-zh="使用 curl 和 -T 选项上传文件">Use curl with the -T flag to upload your file</li>
+                <li class="lang-text" data-en="(Optional) Set expiration time with -H 'X-Expiration-Seconds: 3600' for time-limited access" data-zh="（可选）使用 -H 'X-Expiration-Seconds: 3600' 设置有效期以限时访问">(Optional) Set expiration time with -H 'X-Expiration-Seconds: 3600' for time-limited access</li>
+                <li class="lang-text" data-en="Receive a unique download URL" data-zh="接收唯一的下载链接">Receive a unique download URL</li>
+                <li class="lang-text" data-en="Share the URL - works once without expiration, or multiple times until expiration!" data-zh="分享链接 - 无有效期时只能使用一次，有有效期时可多次使用直到过期！">Share the URL - works once without expiration, or multiple times until expiration!</li>
+                <li class="lang-text" data-en="File is automatically deleted after download or expiration" data-zh="文件在下载后或过期后自动删除">File is automatically deleted after download or expiration</li>
+            </ol>
+            <div class="note" style="background-color: #e8f5e9; border-color: #4caf50; margin-top: 20px;">
+                <strong class="lang-text" data-en="🔒 Password Protection:" data-zh="🔒 密码保护：">🔒 Password Protection:</strong>
+                <span class="lang-text" data-en="When password protection is enabled, you must enter the server's configured PASSWORD in the upload form and include the same password in the Authorization header when downloading. Download with: curl -H 'Authorization: yourpassword' [URL]" data-zh="启用密码保护时，您必须在上传表单中输入服务器配置的 PASSWORD，并在下载时在 Authorization 头中包含相同的密码。下载使用：curl -H 'Authorization: yourpassword' [URL]">When password protection is enabled, you must enter the server's configured PASSWORD in the upload form and include the same password in the Authorization header when downloading. Download with: curl -H 'Authorization: yourpassword' [URL]</span>
+            </div>
+        </div>
+
+        <div class="note" style="background-color: #fff3cd; border-color: #ff6b35;">
+            <strong class="lang-text" data-en="⚠️ Download Notice:" data-zh="⚠️ 下载注意：">⚠️ Download Notice:</strong>
+            <span class="lang-text" data-en="By default, files can only be downloaded ONCE. After the first download, the file is automatically and permanently deleted from our servers. If you set an expiration time, the file can be downloaded multiple times until it expires. This ensures maximum privacy and security for your shared files." data-zh="默认情况下，文件只能下载一次。首次下载后，文件将自动并永久地从我们的服务器删除。如果您设置了有效期，文件可以在有效期内多次下载。这确保了您共享文件的最大隐私和安全性。">By default, files can only be downloaded ONCE. After the first download, the file is automatically and permanently deleted from our servers. If you set an expiration time, the file can be downloaded multiple times until it expires. This ensures maximum privacy and security for your shared files.</span>
+        </div>
+    </div>
+
+    <script src="/upload.js"></script>
+</body>
+</html>

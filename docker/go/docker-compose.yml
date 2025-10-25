@@ -1,0 +1,44 @@
+services:
+  bashupload-go:
+    image: dulljz/bashupload-go:latest
+    container_name: bashupload-go
+    ports:
+      - "3000:3000"
+    environment:
+      # R2 S3 API Configuration
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME}
+
+      # Application Configuration
+      - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-5368709120}
+      - MAX_AGE=${MAX_AGE:-3600}
+      - MAX_AGE_FOR_MULTIDOWNLOAD=${MAX_AGE_FOR_MULTIDOWNLOAD:-86400}
+      - ENABLE_SHORT_URL=${ENABLE_SHORT_URL:-false}
+      - ALLOW_LIFETIME_OVER_MAX_AGE=${ALLOW_LIFETIME_OVER_MAX_AGE:-false}
+      - PASSWORD=${PASSWORD:-}
+
+      # Short URL Service
+      - SHORT_URL_SERVICE=${SHORT_URL_SERVICE:-https://suosuo.de/short}
+
+      # Server Configuration
+      - PORT=3000
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
