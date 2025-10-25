@@ -44,10 +44,8 @@ R2_BUCKET_NAME=your_bucket_name
 ### 3. 启动服务
 
 ```bash
-# 使用启动脚本（推荐）
-./start.sh
 
-# 或直接使用 docker-compose
+# 直接使用 docker-compose
 docker-compose up -d
 
 # 查看日志
