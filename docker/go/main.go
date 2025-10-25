@@ -19,11 +19,13 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/gabriel-vasile/mimetype"
 )
 
 var (
 	s3Client                *s3.S3
+	uploader                *s3manager.Uploader
 	bucketName              string
 	maxUploadSize           int64
 	maxAge                  int64
@@ -68,6 +70,7 @@ func init() {
 	}))
 
 	s3Client = s3.New(sess)
+	uploader = s3manager.NewUploaderWithClient(s3Client)
 
 	log.Printf("BashUpload Go server initialized")
 	log.Printf("R2 Bucket: %s", bucketName)
@@ -266,8 +269,14 @@ func downloadFile(w http.ResponseWriter, r *http.Request, fileName string) {
 	defer getOutput.Body.Close()
 
 	// 设置响应头
-	mtype := mimetype.Lookup(fileName)
-	w.Header().Set("Content-Type", mtype.String())
+	contentType := "application/octet-stream"
+	if mtype := mimetype.Lookup(fileName); mtype != nil {
+		contentType = mtype.String()
+	} else if headOutput.ContentType != nil {
+		contentType = *headOutput.ContentType
+	}
+
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
@@ -356,15 +365,15 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 	}
 
 	// 上传到 R2 (使用流式上传，不需要将整个文件加载到内存)
-	putInput := &s3.PutObjectInput{
+	uploadInput := &s3manager.UploadInput{
 		Bucket:      aws.String(bucketName),
 		Key:         aws.String(fileName),
-		Body:        aws.ReadSeekCloser(r.Body),
+		Body:        r.Body,
 		ContentType: aws.String(contentType),
 		Metadata:    metadata,
 	}
 
-	_, err := s3Client.PutObject(putInput)
+	_, err := uploader.Upload(uploadInput)
 	if err != nil {
 		log.Printf("Upload error: %v", err)
 		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
