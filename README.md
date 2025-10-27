@@ -13,8 +13,11 @@ Thanks to [bashupload.com](https://bashupload.com) and its author [@mrcrypster](
 ## Quick Start
 
 ```sh
-# Upload with normal URL
+# Upload file with normal URL
 curl bashupload.app -T file.txt
+
+# Upload text content (saved as .txt file)
+curl bashupload.app -d "Your long text content here"
 
 # Upload with short URL
 curl bashupload.app/short -T file.txt
@@ -27,17 +30,20 @@ Use `alias` in bash to set quick upload
 
 ```sh
 alias bashupload='curl bashupload.app -T'
+alias bashuploadtext='curl bashupload.app -d'
 alias bashuploadshort='curl bashupload.app/short -T'
 alias bashuploadexpire='curl -H "X-Expiration-Seconds: 3600" bashupload.app -T'
-bashupload file.txt        # Returns normal URL
-bashuploadshort file.txt   # Returns short URL
-bashuploadexpire file.txt  # Returns URL with 1 hour expiration
+bashupload file.txt              # Returns normal URL
+bashuploadtext "your text here"  # Upload text content
+bashuploadshort file.txt         # Returns short URL
+bashuploadexpire file.txt        # Returns URL with 1 hour expiration
 ```
 
 To make the alias persistent, add it to your shell configuration file.
 
 ```sh
 echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
+echo "alias bashuploadtext='curl bashupload.app -d'" >> ~/.bashrc
 echo "alias bashuploadshort='curl bashupload.app/short -T'" >> ~/.bashrc
 echo "alias bashuploadexpire='curl -H \"X-Expiration-Seconds: 3600\" bashupload.app -T'" >> ~/.bashrc
 source ~/.bashrc
@@ -53,6 +59,7 @@ source ~/.bashrc
 ## Features
 
 - Simple command-line interface
+- Quick text sharing
 - Browser-based drag & drop upload
 - No registration required
 - Direct download links
@@ -101,6 +108,28 @@ curl -H "X-Expiration-Seconds: 604800" bashupload.app -T file.txt
 - With expiration time, files can be downloaded multiple times until expiration
 - The maximum allowed expiration time is controlled by `MAX_AGE_FOR_MULTIDOWNLOAD` (default: 24 hours)
 - Browser upload also supports setting expiration times through the UI
+
+### Quick Text Sharing
+
+You can quickly share long text snippets, code, logs, or any text content without creating a file first. Simply use `curl -d` to upload text directly, and it will be saved as a `.txt` file.
+
+Example:
+```sh
+# Share a quick text snippet
+curl bashupload.app -d "Here's the error message I'm getting..."
+
+# Share code snippet
+curl bashupload.app -d "$(cat script.sh)"
+
+# Share command output
+curl bashupload.app -d "$(ls -la)"
+
+# Share with expiration time for multiple views
+curl -H "X-Expiration-Seconds: 3600" bashupload.app -d "Meeting notes for today..."
+
+# Combine with short URL for easier sharing
+curl bashupload.app/short -d "Your text content here"
+```
 
 ### Password Protection
 

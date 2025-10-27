@@ -13,8 +13,11 @@
 ## 快速开始
 
 ```sh
-# 上传并返回普通链接
+# 上传文件并返回普通链接
 curl bashupload.app -T file.txt
+
+# 上传文本内容（保存为 .txt 文件）
+curl bashupload.app -d "你的长文本内容"
 
 # 上传并返回短链接
 curl bashupload.app/short -T file.txt
@@ -27,17 +30,20 @@ curl -H "X-Expiration-Seconds: 86400" bashupload.app -T file.txt
 
 ```sh
 alias bashupload='curl bashupload.app -T'
+alias bashuploadtext='curl bashupload.app -d'
 alias bashuploadshort='curl bashupload.app/short -T'
 alias bashuploadexpire='curl -H "X-Expiration-Seconds: 3600" bashupload.app -T'
-bashupload file.txt        # 返回普通链接
-bashuploadshort file.txt     # 返回短链接
-bashuploadexpire file.txt  # 返回1小时有效期链接
+bashupload file.txt            # 返回普通链接
+bashuploadtext "你的文本内容"   # 上传文本内容
+bashuploadshort file.txt       # 返回短链接
+bashuploadexpire file.txt      # 返回1小时有效期链接
 ```
 
 要使别名永久生效，请将其添加到你的 shell 配置文件中。
 
 ```sh
 echo "alias bashupload='curl bashupload.app -T'" >> ~/.bashrc
+echo "alias bashuploadtext='curl bashupload.app -d'" >> ~/.bashrc
 echo "alias bashuploadshort='curl bashupload.app/short -T'" >> ~/.bashrc
 echo "alias bashuploadexpire='curl -H \"X-Expiration-Seconds: 3600\" bashupload.app -T'" >> ~/.bashrc
 source ~/.bashrc
@@ -53,6 +59,7 @@ source ~/.bashrc
 ## 特性
 
 - 简单的命令行接口
+- 快速文本分享
 - 浏览器拖拽上传
 - 无需注册
 - 直接下载链接
@@ -102,6 +109,28 @@ curl -H "X-Expiration-Seconds: 604800" bashupload.app -T file.txt
 - 设置有效期后，文件在有效期内可多次下载
 - 最大允许的有效期由 `MAX_AGE_FOR_MULTIDOWNLOAD` 控制（默认：24小时）
 - 浏览器上传也通过UI支持设置有效期
+
+### 快速文本分享
+
+您可以快速分享长文本片段、代码、日志或任何文本内容，无需先创建文件。只需使用 `curl -d` 直接上传文本，它将自动保存为 `.txt` 文件。
+
+示例：
+```sh
+# 分享快速文本片段
+curl bashupload.app -d "这是我遇到的错误信息..."
+
+# 分享代码片段
+curl bashupload.app -d "$(cat script.sh)"
+
+# 分享命令输出
+curl bashupload.app -d "$(ls -la)"
+
+# 设置有效期以便多次查看
+curl -H "X-Expiration-Seconds: 3600" bashupload.app -d "今天的会议记录..."
+
+# 结合短链接方便分享
+curl bashupload.app/short -d "你的文本内容"
+```
 
 ### 密码保护
 
