@@ -124,7 +124,8 @@ export default {
           return new Response(`bashupload.app - 一次性文件分享服务 | One-time File Sharing Service
 
 使用方法 Usage:
-  curl bashupload.app -T file.txt                    # 返回普通链接 / Normal URL
+  curl bashupload.app -T file.txt                    # 上传文件 / Upload file
+  curl bashupload.app -d "text content"              # 上传文本 / Upload text (saved as .txt)
   curl bashupload.app/short -T file.txt              # 返回短链接 / Short URL
   curl -H "X-Expiration-Seconds: 3600" bashupload.app -T file.txt   # 设置有效期 / Set expiration time
 
@@ -264,8 +265,8 @@ export default {
       }
     }
 
-    // 处理 PUT 请求（curl -T 使用 PUT）
-    if (request.method !== 'PUT') {
+    // 处理 PUT 和 POST 请求（curl -T 使用 PUT，curl -d 使用 POST）
+    if (request.method !== 'PUT' && request.method !== 'POST') {
       return new Response('Method Not Allowed\n', { status: 405 });
     }
 
@@ -321,10 +322,19 @@ export default {
 
       // 生成随机文件名
       const randomId = generateRandomId();
-      const contentType = request.headers.get('content-type') || 'application/octet-stream';
-      // 使用 mime.js 根据 Content-Type 获取扩展名
-      const ext = mime.getExtension(contentType);
-      const extension = ext ? `.${ext}` : '';
+      let contentType = request.headers.get('content-type') || 'application/octet-stream';
+      let extension = '';
+
+      // 如果是 POST 请求（curl -d），强制使用 .txt 扩展名和 text/plain content-type
+      if (request.method === 'POST') {
+        contentType = 'text/plain; charset=utf-8';
+        extension = '.txt';
+      } else {
+        // PUT 请求：使用 mime.js 根据 Content-Type 获取扩展名
+        const ext = mime.getExtension(contentType);
+        extension = ext ? `.${ext}` : '';
+      }
+
       const fileName = `${randomId}${extension}`;
 
       // 使用流式上传 - 直接传递 request.body 到 R2

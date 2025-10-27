@@ -122,7 +122,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleShort(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "PUT" {
+	if r.Method == "PUT" || r.Method == "POST" {
 		handleUpload(w, r, true)
 	} else {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -140,7 +140,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			// 静态文件或下载文件
 			handleGetFile(w, r)
 		}
-	case "PUT":
+	case "PUT", "POST":
 		handleUpload(w, r, false)
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -154,7 +154,8 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `bashupload.app - 一次性文件分享服务 | One-time File Sharing Service
 
 使用方法 Usage:
-  curl bashupload.app -T file.txt                    # 返回普通链接 / Normal URL
+  curl bashupload.app -T file.txt                    # 上传文件 / Upload file
+  curl bashupload.app -d "text content"              # 上传文本 / Upload text (saved as .txt)
   curl bashupload.app/short -T file.txt              # 返回短链接 / Short URL
   curl -H "X-Expiration-Seconds: 3600" bashupload.app -T file.txt   # 设置有效期 / Set expiration time
 
@@ -348,7 +349,16 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 		contentType = "application/octet-stream"
 	}
 
-	ext := mimetype.Lookup(contentType).Extension()
+	var ext string
+	// 如果是 POST 请求（curl -d），强制使用 .txt 扩展名和 text/plain content-type
+	if r.Method == "POST" {
+		contentType = "text/plain; charset=utf-8"
+		ext = ".txt"
+	} else {
+		// PUT 请求：使用 mimetype 根据 Content-Type 获取扩展名
+		ext = mimetype.Lookup(contentType).Extension()
+	}
+
 	fileName := randomID + ext
 
 	// 准备元数据
