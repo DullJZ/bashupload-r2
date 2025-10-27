@@ -290,3 +290,64 @@ h2 {
 .set-expiration-btn:hover {
     background: #218838;
 }
+.upload-mode-toggle {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+.mode-button {
+    padding: 12px 30px;
+    border: 2px solid #dee2e6;
+    background-color: white;
+    color: #6c757d;
+    font-size: 16px;
+    font-weight: 500;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+.mode-button:hover {
+    border-color: #3498db;
+    color: #3498db;
+}
+.mode-button.active {
+    border-color: #3498db;
+    background-color: #3498db;
+    color: white;
+}
+.text-upload-container {
+    background-color: #f8f9fa;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    margin: 30px 0;
+}
+.text-upload-icon {
+    font-size: 48px;
+    color: #6c757d;
+    margin-bottom: 20px;
+}
+.text-input {
+    width: 100%;
+    max-width: 100%;
+    padding: 15px;
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.5;
+    resize: vertical;
+    margin: 20px 0;
+    box-sizing: border-box;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.text-input:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+}
+.text-input::placeholder {
+    color: #6c757d;
+}

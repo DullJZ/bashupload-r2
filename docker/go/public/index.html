@@ -30,10 +30,23 @@
         <div class="section">
             <h2 class="lang-text" data-en="Quick Start" data-zh="快速开始">Quick Start</h2>
             <div class="code-block">$ curl bashupload.app -T file.txt</div>
+            <div class="code-block" style="margin-top: 10px;">$ curl bashupload.app -d "your text content"</div>
         </div>
 
         <div class="section">
             <h2 class="lang-text" data-en="Browser Upload" data-zh="浏览器上传">Browser Upload</h2>
+
+            <!-- Upload mode toggle buttons -->
+            <div class="upload-mode-toggle">
+                <button class="mode-button active" id="fileModeBtn" onclick="switchUploadMode('file')">
+                    <span class="lang-text" data-en="📁 Upload File" data-zh="📁 上传文件">📁 Upload File</span>
+                </button>
+                <button class="mode-button" id="textModeBtn" onclick="switchUploadMode('text')">
+                    <span class="lang-text" data-en="📝 Share Text" data-zh="📝 分享文本">📝 Share Text</span>
+                </button>
+            </div>
+
+            <!-- File upload area -->
             <div class="upload-container" id="uploadContainer">
                 <div class="upload-icon">📁</div>
                 <h3 class="lang-text" data-en="Drag & Drop files here" data-zh="拖放文件到这里">Drag & Drop files here</h3>
@@ -107,6 +120,23 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Text upload area -->
+            <div class="text-upload-container" id="textUploadContainer" style="display: none;">
+                <div class="text-upload-icon">📝</div>
+                <h3 class="lang-text" data-en="Share Long Text" data-zh="分享长文本">Share Long Text</h3>
+                <p class="upload-text lang-text" data-en="Paste your text content below (saved as .txt file)" data-zh="在下方粘贴您的文本内容（保存为 .txt 文件）">Paste your text content below (saved as .txt file)</p>
+                <textarea id="textInput"
+                          class="text-input"
+                          placeholder="Enter your text content here..."
+                          data-en-placeholder="Enter your text content here..."
+                          data-zh-placeholder="在此输入您的文本内容..."
+                          rows="10"></textarea>
+                <button class="upload-button" id="uploadTextBtn" onclick="handleTextUpload()">
+                    <span class="lang-text" data-en="Upload Text" data-zh="上传文本">Upload Text</span>
+                </button>
+            </div>
+
             <div class="upload-status" id="uploadStatus"></div>
             <div class="progress-bar" id="progressBar">
                 <div class="progress-fill" id="progressFill"></div>
@@ -124,6 +154,7 @@
                     <span class="lang-text" data-en="🛡️ Maximum privacy: Files automatically deleted after expiration" data-zh="🛡️ 最大隐私保护：文件在有效期后自动删除">🛡️ Maximum privacy: Files automatically deleted after expiration</span>
                 </div>
                 <div class="feature lang-text" data-en="Simple command-line interface" data-zh="简单的命令行接口">Simple command-line interface</div>
+                <div class="feature lang-text" data-en="Quick text sharing: Use curl -d to share text snippets" data-zh="快速文本分享：使用 curl -d 分享文本片段">Quick text sharing: Use curl -d to share text snippets</div>
                 <div class="feature lang-text" data-en="Browser-based drag & drop upload" data-zh="浏览器拖放上传">Browser-based drag & drop upload</div>
                 <div class="feature lang-text" data-en="No registration required" data-zh="无需注册">No registration required</div>
                 <div class="feature lang-text" data-en="Privacy-focused: Random filenames" data-zh="隐私保护：随机文件名">Privacy-focused: Random filenames</div>

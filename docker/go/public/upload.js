@@ -2,6 +2,7 @@ const UPLOAD_URL = window.location.origin;
 let uploadedFiles = [];
 let currentLang = 'en';
 let serverConfig = null;
+let currentUploadMode = 'file'; // 'file' or 'text'
 
 // 格式化字节数为可读字符串
 function formatBytes(bytes) {
@@ -131,6 +132,230 @@ function switchLanguage(lang) {
     updateMaxExpirationDisplay();
     // Update max file size display after language switch
     updateMaxFileSizeDisplay();
+    // Update text input placeholder after language switch
+    updateTextInputPlaceholder();
+    // Update expiration placeholder after language switch
+    updateExpirationPlaceholder();
+}
+
+// Switch upload mode between file and text
+function switchUploadMode(mode) {
+    currentUploadMode = mode;
+    const fileContainer = document.getElementById('uploadContainer');
+    const textContainer = document.getElementById('textUploadContainer');
+    const fileModeBtn = document.getElementById('fileModeBtn');
+    const textModeBtn = document.getElementById('textModeBtn');
+
+    if (mode === 'file') {
+        fileContainer.style.display = 'block';
+        textContainer.style.display = 'none';
+        fileModeBtn.classList.add('active');
+        textModeBtn.classList.remove('active');
+    } else {
+        fileContainer.style.display = 'none';
+        textContainer.style.display = 'block';
+        fileModeBtn.classList.remove('active');
+        textModeBtn.classList.add('active');
+    }
+}
+
+// Handle text upload
+function handleTextUpload() {
+    const textInput = document.getElementById('textInput');
+    const text = textInput.value.trim();
+
+    if (!text) {
+        const errorMsg = currentLang === 'zh'
+            ? '请输入要分享的文本内容'
+            : 'Please enter text content to share';
+        showStatus(errorMsg, 'error');
+        return;
+    }
+
+    // Check if password protection is enabled but no password provided
+    const usePassword = document.getElementById('usePassword')?.checked;
+    const passwordInput = document.getElementById('passwordInput');
+    if (usePassword && (!passwordInput || !passwordInput.value.trim())) {
+        const errorMsg = currentLang === 'zh'
+            ? '请输入密码以启用密码保护。'
+            : 'Please enter a password to enable password protection.';
+        showStatus(errorMsg, 'error');
+        return;
+    }
+
+    uploadText(text);
+}
+
+// Upload text content
+async function uploadText(text, maxRetries = 3) {
+    const uploadingMsg = currentLang === 'zh'
+        ? '正在上传文本...'
+        : 'Uploading text...';
+    showStatus(uploadingMsg, 'uploading');
+    showProgress();
+
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await uploadTextWithProgress(text, (progress) => {
+                updateProgress(progress);
+            });
+
+            if (response.status === 200) {
+                const responseUrl = response.responseText.trim();
+                if (responseUrl.startsWith('http')) {
+                    hideProgress();
+                    // 根据是否设置了有效期显示不同的成功消息
+                    const useExpiration = document.getElementById('useExpiration')?.checked;
+                    let successMsg;
+                    if (useExpiration) {
+                        const setExpirationBtn = document.getElementById('setExpirationBtn');
+                        const expirationSeconds = setExpirationBtn.getAttribute('data-expiration-seconds');
+
+                        if (expirationSeconds) {
+                            const seconds = parseInt(expirationSeconds);
+                            let value = seconds;
+                            let unit = 'seconds';
+
+                            if (seconds % 86400 === 0) {
+                                value = seconds / 86400;
+                                unit = 'days';
+                            } else if (seconds % 3600 === 0) {
+                                value = seconds / 3600;
+                                unit = 'hours';
+                            } else if (seconds % 60 === 0) {
+                                value = seconds / 60;
+                                unit = 'minutes';
+                            }
+
+                            let expirationString = currentLang === 'zh'
+                                ? `${value}${unit}`
+                                : `${value} ${unit}`;
+
+                            successMsg = currentLang === 'zh'
+                                ? `文本上传成功！(有效期: ${expirationString})`
+                                : `Text uploaded successfully! (Expiration: ${expirationString})`;
+                        } else {
+                            successMsg = currentLang === 'zh'
+                                ? `文本上传成功！(默认有效期: 1小时)`
+                                : `Text uploaded successfully! (Default expiration: 1 hour)`;
+                        }
+                    } else {
+                        successMsg = currentLang === 'zh'
+                            ? `文本上传成功！(一次性下载)`
+                            : `Text uploaded successfully! (One-time download)`;
+                    }
+                    showStatus(successMsg, 'success');
+                    // 提取纯URL（去除警告信息）
+                    const cleanUrl = responseUrl.split('\n')[0];
+                    const usePassword = document.getElementById('usePassword')?.checked;
+                    addFileToList('text.txt', cleanUrl, usePassword);
+                    uploadedFiles.push({ name: 'text.txt', url: cleanUrl, passwordProtected: usePassword });
+
+                    // Clear text input after successful upload
+                    document.getElementById('textInput').value = '';
+                    return;
+                } else {
+                    const errorMsg = currentLang === 'zh'
+                        ? '上传完成但收到意外响应'
+                        : 'Upload completed but received unexpected response';
+                    throw new Error(errorMsg);
+                }
+            } else if (response.status === 401) {
+                hideProgress();
+                const passwordErrorMsg = currentLang === 'zh'
+                    ? '密码错误，请检查您输入的密码是否与服务器配置的PASSWORD环境变量相同'
+                    : 'Password error, please check that the password you entered matches the PASSWORD environment variable configured on the server';
+                showStatus(passwordErrorMsg, 'error');
+                return;
+            } else {
+                throw new Error(`Server returned status ${response.status}`);
+            }
+        } catch (error) {
+            lastError = error;
+            console.log(`Upload failed (attempt ${attempt}/${maxRetries}):`, error);
+
+            if (attempt < maxRetries) {
+                const delay = Math.pow(2, attempt - 1) * 1000;
+                console.log(`Retrying in ${delay/1000} seconds...`);
+                const retryMsg = currentLang === 'zh'
+                    ? `上传失败，${delay/1000} 秒后重试...`
+                    : `Upload failed, retrying in ${delay/1000} seconds...`;
+                showStatus(retryMsg, 'uploading');
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    hideProgress();
+    const failedMsg = currentLang === 'zh'
+        ? `上传文本失败，已重试 ${maxRetries} 次。错误：${lastError.message}`
+        : `Failed to upload text after ${maxRetries} attempts. Error: ${lastError.message}`;
+    showStatus(failedMsg, 'error');
+}
+
+// Upload text with progress tracking
+function uploadTextWithProgress(text, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+
+        // Upload progress
+        xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = (e.loaded / e.total) * 100;
+                onProgress(percentComplete);
+            }
+        });
+
+        // Upload complete
+        xhr.addEventListener('load', function() {
+            resolve({
+                status: xhr.status,
+                responseText: xhr.responseText
+            });
+        });
+
+        // Upload error
+        xhr.addEventListener('error', function() {
+            reject(new Error('Network error occurred'));
+        });
+
+        // Check if short URL option is selected
+        const useShortUrl = document.getElementById('useShortUrl')?.checked;
+        const uploadPath = useShortUrl ? `${UPLOAD_URL}/short` : `${UPLOAD_URL}/`;
+
+        // Check if password protection is enabled
+        const usePassword = document.getElementById('usePassword')?.checked;
+        const passwordInput = document.getElementById('passwordInput');
+
+        // Check if expiration is set
+        const useExpiration = document.getElementById('useExpiration')?.checked;
+
+        // Use POST method for text upload
+        xhr.open('POST', uploadPath);
+        xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+
+        // Add Authorization header if password is provided
+        if (usePassword && passwordInput.value) {
+            xhr.setRequestHeader('Authorization', passwordInput.value);
+        }
+
+        // Add expiration header if expiration is set
+        if (useExpiration) {
+            const setExpirationBtn = document.getElementById('setExpirationBtn');
+            let expirationSeconds = setExpirationBtn.getAttribute('data-expiration-seconds');
+
+            // If no expiration time was explicitly set, use default (1 hour)
+            if (!expirationSeconds) {
+                expirationSeconds = '3600';
+            }
+
+            xhr.setRequestHeader('X-Expiration-Seconds', expirationSeconds);
+        }
+
+        // Send text as form data
+        xhr.send(text);
+    });
 }
 
 // Initialize language on page load
@@ -223,7 +448,19 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Update expiration placeholder based on language
     updateExpirationPlaceholder();
+
+    // Update text input placeholder based on language
+    updateTextInputPlaceholder();
 });
+
+function updateTextInputPlaceholder() {
+    const textInput = document.getElementById('textInput');
+    if (textInput) {
+        const enPlaceholder = textInput.getAttribute('data-en-placeholder');
+        const zhPlaceholder = textInput.getAttribute('data-zh-placeholder');
+        textInput.placeholder = currentLang === 'zh' ? zhPlaceholder : enPlaceholder;
+    }
+}
 
 function updatePasswordPlaceholder() {
     const passwordInput = document.getElementById('passwordInput');
