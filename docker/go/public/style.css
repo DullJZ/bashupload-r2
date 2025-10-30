@@ -204,6 +204,12 @@ h2 {
     display: flex;
     justify-content: center;
 }
+.shared-options {
+    margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
 .checkbox-label {
     display: inline-flex;
     align-items: center;

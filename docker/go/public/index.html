@@ -56,6 +56,26 @@
                     <span class="lang-text" data-en="Max: --" data-zh="最大: --">Max: --</span>
                 </div>
                 <input type="file" id="fileInput" multiple onchange="handleFileSelect(event)">
+            </div>
+
+            <!-- Text upload area -->
+            <div class="text-upload-container" id="textUploadContainer" style="display: none;">
+                <div class="text-upload-icon">📝</div>
+                <h3 class="lang-text" data-en="Share Long Text" data-zh="分享长文本">Share Long Text</h3>
+                <p class="upload-text lang-text" data-en="Paste your text content below (saved as .txt file)" data-zh="在下方粘贴您的文本内容（保存为 .txt 文件）">Paste your text content below (saved as .txt file)</p>
+                <textarea id="textInput"
+                          class="text-input"
+                          placeholder="Enter your text content here..."
+                          data-en-placeholder="Enter your text content here..."
+                          data-zh-placeholder="在此输入您的文本内容..."
+                          rows="10"></textarea>
+                <button class="upload-button" id="uploadTextBtn" onclick="handleTextUpload()">
+                    <span class="lang-text" data-en="Upload Text" data-zh="上传文本">Upload Text</span>
+                </button>
+            </div>
+
+            <!-- Shared upload options for files and text -->
+            <div class="shared-options">
                 <div class="upload-options">
                     <label class="checkbox-label">
                         <input type="checkbox" id="useShortUrl" class="checkbox-input">
@@ -119,22 +139,6 @@
                         <span class="lang-text" data-en="⚠️ Important: The password must match the server's PASSWORD environment variable" data-zh="⚠️ 重要：密码必须与服务器的 PASSWORD 环境变量相同">⚠️ Important: The password must match the server's PASSWORD environment variable</span>
                     </div>
                 </div>
-            </div>
-
-            <!-- Text upload area -->
-            <div class="text-upload-container" id="textUploadContainer" style="display: none;">
-                <div class="text-upload-icon">📝</div>
-                <h3 class="lang-text" data-en="Share Long Text" data-zh="分享长文本">Share Long Text</h3>
-                <p class="upload-text lang-text" data-en="Paste your text content below (saved as .txt file)" data-zh="在下方粘贴您的文本内容（保存为 .txt 文件）">Paste your text content below (saved as .txt file)</p>
-                <textarea id="textInput"
-                          class="text-input"
-                          placeholder="Enter your text content here..."
-                          data-en-placeholder="Enter your text content here..."
-                          data-zh-placeholder="在此输入您的文本内容..."
-                          rows="10"></textarea>
-                <button class="upload-button" id="uploadTextBtn" onclick="handleTextUpload()">
-                    <span class="lang-text" data-en="Upload Text" data-zh="上传文本">Upload Text</span>
-                </button>
             </div>
 
             <div class="upload-status" id="uploadStatus"></div>
