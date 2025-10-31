@@ -224,6 +224,13 @@ h2 {
 .checkbox-label:hover {
     background-color: #f0f0f0;
 }
+.checkbox-label.disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+.checkbox-label.disabled:hover {
+    background-color: #fff;
+}
 .checkbox-input {
     width: 18px;
     height: 18px;

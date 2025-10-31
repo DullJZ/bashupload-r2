@@ -23,6 +23,13 @@ import (
 	"github.com/gabriel-vasile/mimetype"
 )
 
+type configResponse struct {
+	MaxAgeForMultiDownload int64 `json:"maxAgeForMultiDownload"`
+	MaxUploadSize          int64 `json:"maxUploadSize"`
+	MaxAge                 int64 `json:"maxAge"`
+	NeedPassword           bool  `json:"needPassword"`
+}
+
 var (
 	s3Client                *s3.S3
 	uploader                *s3manager.Uploader
@@ -107,10 +114,11 @@ func main() {
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
-	config := map[string]int64{
-		"maxAgeForMultiDownload": maxAgeForMultiDownload,
-		"maxUploadSize":          maxUploadSize,
-		"maxAge":                 maxAge,
+	config := configResponse{
+		MaxAgeForMultiDownload: maxAgeForMultiDownload,
+		MaxUploadSize:          maxUploadSize,
+		MaxAge:                 maxAge,
+		NeedPassword:           password != "",
 	}
 
 	w.Header().Set("Content-Type", "application/json")

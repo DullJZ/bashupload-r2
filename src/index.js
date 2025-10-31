@@ -101,7 +101,8 @@ export default {
         const config = {
           maxAgeForMultiDownload: parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10),
           maxUploadSize: parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10),
-          maxAge: parseInt(env.MAX_AGE || '3600', 10)
+          maxAge: parseInt(env.MAX_AGE || '3600', 10),
+          needPassword: Boolean(env.PASSWORD)
         };
         
         return new Response(JSON.stringify(config), {
@@ -445,4 +446,3 @@ function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + sizes[i];
 }
-

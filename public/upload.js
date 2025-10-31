@@ -21,6 +21,7 @@ async function fetchServerConfig() {
             serverConfig = await response.json();
             updateMaxExpirationDisplay();
             updateMaxFileSizeDisplay();
+            applyPasswordRequirement();
         }
     } catch (error) {
         console.error('Failed to fetch server configuration:', error);
@@ -94,6 +95,133 @@ function updateMaxFileSizeDisplay() {
         maxFileSizeFeature.setAttribute('data-en', featureTextEn);
         maxFileSizeFeature.setAttribute('data-zh', featureTextZh);
         maxFileSizeFeature.textContent = currentLang === 'zh' ? featureTextZh : featureTextEn;
+    }
+}
+
+function applyPasswordRequirement() {
+    const usePasswordCheckbox = document.getElementById('usePassword');
+    const passwordContainer = document.getElementById('passwordContainer');
+    const passwordInput = document.getElementById('passwordInput');
+    const passwordNotice = document.getElementById('passwordNotice');
+    const passwordLabel = usePasswordCheckbox?.closest('.checkbox-label');
+    const passwordLabelTexts = passwordLabel ? passwordLabel.querySelectorAll('.lang-text') : null;
+    const passwordNoticeText = passwordNotice ? passwordNotice.querySelector('.lang-text') : null;
+
+    if (!usePasswordCheckbox || !passwordContainer || !passwordInput) {
+        return;
+    }
+
+    const isRequired = Boolean(serverConfig && serverConfig.needPassword);
+
+    // Cache default translations for later restoration
+    if (passwordNoticeText) {
+        if (!passwordNoticeText.dataset.enDefault) {
+            passwordNoticeText.dataset.enDefault = passwordNoticeText.getAttribute('data-en') || '';
+        }
+        if (!passwordNoticeText.dataset.zhDefault) {
+            passwordNoticeText.dataset.zhDefault = passwordNoticeText.getAttribute('data-zh') || '';
+        }
+    }
+    if (passwordLabelTexts && passwordLabelTexts.length > 0) {
+        const labelMainText = passwordLabelTexts[0];
+        if (labelMainText && !labelMainText.dataset.enDefault) {
+            labelMainText.dataset.enDefault = labelMainText.getAttribute('data-en') || '';
+        }
+        if (labelMainText && !labelMainText.dataset.zhDefault) {
+            labelMainText.dataset.zhDefault = labelMainText.getAttribute('data-zh') || '';
+        }
+        if (passwordLabelTexts.length > 1) {
+            const tooltipText = passwordLabelTexts[1];
+            if (tooltipText && !tooltipText.dataset.enDefault) {
+                tooltipText.dataset.enDefault = tooltipText.getAttribute('data-en') || '';
+            }
+            if (tooltipText && !tooltipText.dataset.zhDefault) {
+                tooltipText.dataset.zhDefault = tooltipText.getAttribute('data-zh') || '';
+            }
+        }
+    }
+
+    if (isRequired) {
+        usePasswordCheckbox.checked = true;
+        usePasswordCheckbox.disabled = true;
+        if (passwordLabel) {
+            passwordLabel.classList.add('disabled');
+        }
+        passwordContainer.style.display = 'block';
+        passwordInput.setAttribute('aria-required', 'true');
+        updatePasswordPlaceholder();
+
+        if (passwordNoticeText) {
+            passwordNoticeText.setAttribute('data-en', '⚠️ Password required: The server enforces uploads to include the configured password');
+            passwordNoticeText.setAttribute('data-zh', '⚠️ 必须输入密码：服务器要求上传时提供配置的密码');
+            passwordNoticeText.textContent = currentLang === 'zh'
+                ? passwordNoticeText.getAttribute('data-zh')
+                : passwordNoticeText.getAttribute('data-en');
+        }
+
+        if (passwordLabelTexts && passwordLabelTexts.length > 0) {
+            const labelMainText = passwordLabelTexts[0];
+            labelMainText.setAttribute('data-en', 'Server password required');
+            labelMainText.setAttribute('data-zh', '服务器要求必须输入密码');
+            labelMainText.textContent = currentLang === 'zh'
+                ? labelMainText.getAttribute('data-zh')
+                : labelMainText.getAttribute('data-en');
+
+            if (passwordLabelTexts.length > 1) {
+                const tooltipText = passwordLabelTexts[1];
+                tooltipText.setAttribute('data-en', 'Every upload must include the configured server password');
+                tooltipText.setAttribute('data-zh', '每次上传都必须填写服务器配置的密码');
+                tooltipText.textContent = currentLang === 'zh'
+                    ? tooltipText.getAttribute('data-zh')
+                    : tooltipText.getAttribute('data-en');
+            }
+        }
+    } else {
+        usePasswordCheckbox.disabled = false;
+        if (passwordLabel) {
+            passwordLabel.classList.remove('disabled');
+        }
+
+        if (passwordNoticeText) {
+            const enDefault = passwordNoticeText.dataset.enDefault || passwordNoticeText.getAttribute('data-en') || '';
+            const zhDefault = passwordNoticeText.dataset.zhDefault || passwordNoticeText.getAttribute('data-zh') || '';
+            passwordNoticeText.setAttribute('data-en', enDefault);
+            passwordNoticeText.setAttribute('data-zh', zhDefault);
+            passwordNoticeText.textContent = currentLang === 'zh' ? zhDefault : enDefault;
+        }
+
+        if (passwordLabelTexts && passwordLabelTexts.length > 0) {
+            const labelMainText = passwordLabelTexts[0];
+            const enDefault = labelMainText.dataset.enDefault || labelMainText.getAttribute('data-en') || '';
+            const zhDefault = labelMainText.dataset.zhDefault || labelMainText.getAttribute('data-zh') || '';
+            labelMainText.setAttribute('data-en', enDefault);
+            labelMainText.setAttribute('data-zh', zhDefault);
+            labelMainText.textContent = currentLang === 'zh' ? zhDefault : enDefault;
+
+            if (passwordLabelTexts.length > 1) {
+                const tooltipText = passwordLabelTexts[1];
+                const tooltipEnDefault = tooltipText.dataset.enDefault || tooltipText.getAttribute('data-en') || '';
+                const tooltipZhDefault = tooltipText.dataset.zhDefault || tooltipText.getAttribute('data-zh') || '';
+                tooltipText.setAttribute('data-en', tooltipEnDefault);
+                tooltipText.setAttribute('data-zh', tooltipZhDefault);
+                tooltipText.textContent = currentLang === 'zh'
+                    ? tooltipZhDefault
+                    : tooltipEnDefault;
+            }
+        }
+
+        // Keep password container visibility aligned with current checkbox state
+        passwordInput.removeAttribute('aria-required');
+
+        if (usePasswordCheckbox.checked) {
+            passwordContainer.style.display = 'block';
+            updatePasswordPlaceholder();
+        } else {
+            passwordContainer.style.display = 'none';
+            passwordInput.value = '';
+            passwordInput.style.borderColor = '#ddd';
+            passwordInput.style.boxShadow = 'none';
+        }
     }
 }
 
@@ -174,8 +302,9 @@ function handleTextUpload() {
 
     // Check if password protection is enabled but no password provided
     const usePassword = document.getElementById('usePassword')?.checked;
+    const requirePassword = Boolean(serverConfig?.needPassword);
     const passwordInput = document.getElementById('passwordInput');
-    if (usePassword && (!passwordInput || !passwordInput.value.trim())) {
+    if ((requirePassword || usePassword) && (!passwordInput || !passwordInput.value.trim())) {
         const errorMsg = currentLang === 'zh'
             ? '请输入密码以启用密码保护。'
             : 'Please enter a password to enable password protection.';
@@ -593,8 +722,9 @@ async function uploadFile(file) {
     
     // Check if password protection is enabled but no password provided
     const usePassword = document.getElementById('usePassword')?.checked;
+    const requirePassword = Boolean(serverConfig?.needPassword);
     const passwordInput = document.getElementById('passwordInput');
-    if (usePassword && (!passwordInput || !passwordInput.value.trim())) {
+    if ((requirePassword || usePassword) && (!passwordInput || !passwordInput.value.trim())) {
         const errorMsg = currentLang === 'zh' 
             ? '请输入密码以启用密码保护。' 
             : 'Please enter a password to enable password protection.';
@@ -879,4 +1009,3 @@ function copyToClipboard(text) {
         document.body.removeChild(textArea);
     }
 }
-
