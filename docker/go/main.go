@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -353,6 +354,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 	// 生成文件名
 	randomID := generateRandomID()
 	contentType := r.Header.Get("Content-Type")
+
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -364,7 +366,17 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 		ext = ".txt"
 	} else {
 		// PUT 请求：使用 mimetype 根据 Content-Type 获取扩展名
-		ext = mimetype.Lookup(contentType).Extension()
+		baseContentType := sanitizeContentType(contentType)
+		ext = determineExtension(baseContentType)
+		if ext == "" {
+			ext = determineExtension(contentType)
+		}
+		if ext == "" && baseContentType == "application/octet-stream" {
+			ext = ".bin"
+		}
+		if baseContentType != "" {
+			contentType = baseContentType
+		}
 	}
 
 	fileName := randomID + ext
@@ -614,4 +626,37 @@ func parseInt64(s string, defaultValue int64) int64 {
 		return defaultValue
 	}
 	return val
+}
+
+func sanitizeContentType(contentType string) string {
+	ct := strings.TrimSpace(contentType)
+	if ct == "" {
+		return ""
+	}
+
+	if mediaType, _, err := mime.ParseMediaType(ct); err == nil {
+		return mediaType
+	}
+
+	if idx := strings.Index(ct, ";"); idx != -1 {
+		return strings.TrimSpace(ct[:idx])
+	}
+
+	return ct
+}
+
+func determineExtension(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+
+	if exts, err := mime.ExtensionsByType(contentType); err == nil && len(exts) > 0 {
+		return exts[0]
+	}
+
+	if m := mimetype.Lookup(contentType); m != nil {
+		return m.Extension()
+	}
+
+	return ""
 }
