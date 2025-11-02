@@ -22,6 +22,7 @@ MAX_AGE = "3600"
 SHORT_URL_SERVICE = "https://suosuo.de/short"
 PASSWORD = ""
 MAX_AGE_FOR_MULTIDOWNLOAD = "86400"
+NO_CLEANUP = "false"
 
 # 静态文件
 [assets]

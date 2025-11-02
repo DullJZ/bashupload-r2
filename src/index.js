@@ -3,6 +3,11 @@ import mime from 'mime';
 export default {
   // 处理定时任务
   async scheduled(event, env, ctx) {
+    if (isCleanupDisabled(env?.NO_CLEANUP)) {
+      console.log('[Scheduled Task] Skipped cleanup because NO_CLEANUP is enabled');
+      return;
+    }
+
     // 获取 MAX_AGE 配置（秒），默认 3600 秒（1小时）
     const maxAge = parseInt(env.MAX_AGE || '3600', 10);
     const now = Date.now();
@@ -427,6 +432,23 @@ export default {
     }
   },
 };
+
+function isCleanupDisabled(value) {
+  if (value === undefined || value === null) {
+    return false;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.toLowerCase().trim();
+    return normalized === '1' || normalized === 'true';
+  }
+
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+
+  return value === true;
+}
 
 // 生成随机 ID
 function generateRandomId() {
