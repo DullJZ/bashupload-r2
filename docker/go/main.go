@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,9 @@ var (
 	shortURLService         string
 	port                    string
 )
+
+//go:embed public/*
+var embeddedStaticFiles embed.FS
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
@@ -208,15 +212,8 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveStaticFile(w http.ResponseWriter, r *http.Request, fileName string) {
-	filePath := filepath.Join("public", fileName)
-	file, err := os.Open(filePath)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer file.Close()
-
-	info, err := file.Stat()
+	filePath := "public/" + fileName
+	data, err := embeddedStaticFiles.ReadFile(filePath)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -227,7 +224,8 @@ func serveStaticFile(w http.ResponseWriter, r *http.Request, fileName string) {
 		w.Header().Set("Content-Type", mtype.String())
 	}
 
-	http.ServeContent(w, r, fileName, info.ModTime(), file)
+	reader := bytes.NewReader(data)
+	http.ServeContent(w, r, fileName, time.Now(), reader)
 }
 
 func downloadFile(w http.ResponseWriter, r *http.Request, fileName string) {
