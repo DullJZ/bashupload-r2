@@ -18,6 +18,9 @@ RUN go mod download
 # 复制源代码
 COPY main.go ./
 
+# 复制静态文件（从项目根目录）
+COPY public/ ./public/
+
 # 编译二进制文件（静态链接）
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
   go build -a -installsuffix cgo -ldflags="-w -s" -o bashupload .
@@ -32,9 +35,6 @@ WORKDIR /app
 
 # 从构建阶段复制二进制文件
 COPY --from=builder /build/bashupload .
-
-# 复制静态文件（从项目根目录）
-COPY public/ ./public/
 
 # 创建非 root 用户
 RUN addgroup -g 1000 appuser && \
