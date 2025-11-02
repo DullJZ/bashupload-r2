@@ -44,6 +44,7 @@ var (
 	password                string
 	shortURLService         string
 	port                    string
+	disableCleanup          bool
 )
 
 //go:embed public/*
@@ -73,6 +74,10 @@ func init() {
 		port = "3000"
 	}
 
+	if envNoCleanup := os.Getenv("NO_CLEANUP"); envNoCleanup != "" {
+		disableCleanup = envNoCleanup == "1" || strings.EqualFold(envNoCleanup, "true")
+	}
+
 	// 配置 S3 客户端
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
 	sess := session.Must(session.NewSession(&aws.Config{
@@ -92,19 +97,23 @@ func init() {
 
 func main() {
 	// 启动定时清理任务
-	go func() {
-		// 启动后10秒执行第一次清理
-		time.Sleep(10 * time.Second)
-		cleanupExpiredFiles()
-
-		// 每5分钟清理一次
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-
-		for range ticker.C {
+	if disableCleanup {
+		log.Printf("Scheduled cleanup disabled via NO_CLEANUP")
+	} else {
+		go func() {
+			// 启动后10秒执行第一次清理
+			time.Sleep(10 * time.Second)
 			cleanupExpiredFiles()
-		}
-	}()
+
+			// 每5分钟清理一次
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+
+			for range ticker.C {
+				cleanupExpiredFiles()
+			}
+		}()
+	}
 
 	// 设置路由
 	http.HandleFunc("/", handleRequest)

@@ -24,6 +24,9 @@ services:
 
       # Server Configuration
       - PORT=3000
+      
+      # NO_CLEANUP
+      - NO_CLEANUP=${NO_CLEANUP:-false}
     env_file:
       - .env
     restart: unless-stopped
