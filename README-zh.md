@@ -68,6 +68,7 @@ source ~/.bashrc
 - 支持自定义有效期：可设置文件有效期，在指定时间内允许多次下载
 - 支持最大 5GB 的文件（自部署可调整）
 - 支持自部署设置密码
+- 单 IP 上传限流（默认每分钟 10 次），防止滥用
 
 **隐私注意：** 为了您的隐私和安全，文件在下载后会立即从我们的服务器上删除。每个文件**默认只能下载一次**，**除非您设置了有效期**。设置有效期后，文件可以在有效期内多次下载。下载后请务必将文件保存在本地，因为链接在首次下载后（一次性下载）或过期后（有效期下载）将不再有效。
 
@@ -83,6 +84,8 @@ source ~/.bashrc
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
 
 `PASSWORD` 环境变量为上传、下载必须提供的密码。如果不需要密码保护，可以将其留空。
+
+上传按客户端 IP 限流（默认每 60 秒 10 次，超限请求返回 HTTP 429）。Worker 版本通过 `wrangler.toml` 中的 `[[ratelimits]]` 绑定配置（删除绑定即禁用；需较新的 wrangler，旧版 4.x 需改用等价的 `[[unsafe.bindings]]`、`type = "ratelimit"` 语法）；Docker 版本使用 `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_LIMIT_WINDOW` 环境变量（`UPLOAD_RATE_LIMIT=0` 禁用），服务直接暴露公网（无反向代理）时需设置 `TRUST_PROXY_HEADERS=false` 防止伪造头绕过限流。
 
 编译部署最后一步可能会出现部署失败的错误，原因是默认使用了配置文件中的 bashupload.app 作为域名。事实上项目已经部署成功，在Worker项目设置中进行域名绑定即可。
 

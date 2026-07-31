@@ -74,6 +74,9 @@ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/
 | `r2.bucketName` | R2 存储桶名称 | `"bashupload"` |
 | `config.maxUploadSize` | 最大上传大小（字节） | `"5368709120"` |
 | `config.maxAge` | 文件最大保存时间（秒） | `"3600"` |
+| `config.uploadRateLimit` | 单 IP 每窗口最大上传次数（`"0"` 禁用） | `"10"` |
+| `config.uploadRateLimitWindow` | 上传限流窗口时长（秒） | `"60"` |
+| `config.trustProxyHeaders` | 是否信任代理头识别客户端 IP（nginx sidecar 场景保持 `"true"`） | `"true"` |
 | `tls.clusterIssuer.email` | Let's Encrypt 邮箱 | `"example@example.com"` |
 | `nodeAffinity.excludeNodes` | 排除的节点列表 | `[]` |
 

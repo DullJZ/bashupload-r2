@@ -14,3 +14,6 @@ data:
   ALLOW_LIFETIME_OVER_MAX_AGE: {{ .Values.config.allowLifetimeOverMaxAge | quote }}
   SHORT_URL_SERVICE: {{ .Values.config.shortUrlService | quote }}
   NO_CLEANUP: {{ .Values.config.noCleanup | quote }}
+  UPLOAD_RATE_LIMIT: {{ .Values.config.uploadRateLimit | quote }}
+  UPLOAD_RATE_LIMIT_WINDOW: {{ .Values.config.uploadRateLimitWindow | quote }}
+  TRUST_PROXY_HEADERS: {{ .Values.config.trustProxyHeaders | quote }}

@@ -1,6 +1,8 @@
 services:
   bashupload-go:
-    image: dulljz/bashupload-go:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: bashupload-go
     ports:
       - "3000:3000"
@@ -27,6 +29,11 @@ services:
       
       # NO_CLEANUP
       - NO_CLEANUP=${NO_CLEANUP:-false}
+
+      # Upload Rate Limiting (per IP)
+      - UPLOAD_RATE_LIMIT=${UPLOAD_RATE_LIMIT:-10}
+      - UPLOAD_RATE_LIMIT_WINDOW=${UPLOAD_RATE_LIMIT_WINDOW:-60}
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
     env_file:
       - .env
     restart: unless-stopped

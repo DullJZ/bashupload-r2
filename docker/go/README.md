@@ -112,6 +112,9 @@ curl http://localhost:3000/short -T test.txt
 - `PASSWORD`: 上传密码保护（可选）
 - `SHORT_URL_SERVICE`: 短链接服务地址，默认 `https://suosuo.de/short`
 - `PORT`: 服务端口，默认 3000
+- `UPLOAD_RATE_LIMIT`: 单 IP 每窗口最大上传次数，`0` 禁用，默认 10
+- `UPLOAD_RATE_LIMIT_WINDOW`: 上传限流窗口时长（秒），默认 60
+- `TRUST_PROXY_HEADERS`: 是否信任 `X-Real-IP`/`X-Forwarded-For` 识别客户端 IP，默认 `true`；服务直接暴露公网（无反向代理）时设为 `false`，防止伪造头绕过限流
 
 ## 性能调优
 

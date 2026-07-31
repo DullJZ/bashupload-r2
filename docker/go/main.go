@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,9 +17,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
@@ -46,6 +49,10 @@ var (
 	shortURLService         string
 	port                    string
 	disableCleanup          bool
+	uploadRateLimit         int64
+	uploadRateLimitWindow   int64
+	trustProxyHeaders       bool
+	uploadLimiter           *rateLimiter
 )
 
 //go:embed public/*
@@ -79,6 +86,15 @@ func init() {
 		disableCleanup = envNoCleanup == "1" || strings.EqualFold(envNoCleanup, "true")
 	}
 
+	// 上传限流配置（0 = 禁用）
+	uploadRateLimit = parseInt64(os.Getenv("UPLOAD_RATE_LIMIT"), 10)
+	uploadRateLimitWindow = parseInt64(os.Getenv("UPLOAD_RATE_LIMIT_WINDOW"), 60)
+	// 裸跑无反代时应设为 false，防止伪造代理头绕过限流
+	trustProxyHeaders = !strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "false")
+	if uploadRateLimit > 0 && uploadRateLimitWindow > 0 {
+		uploadLimiter = newRateLimiter(int(uploadRateLimit), time.Duration(uploadRateLimitWindow)*time.Second)
+	}
+
 	// 配置 S3 客户端
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
 	sess := session.Must(session.NewSession(&aws.Config{
@@ -94,6 +110,11 @@ func init() {
 	log.Printf("R2 Bucket: %s", bucketName)
 	log.Printf("Max upload size: %s", formatBytes(maxUploadSize))
 	log.Printf("Max age: %ds", maxAge)
+	if uploadLimiter != nil {
+		log.Printf("Upload rate limit: %d requests per %ds per IP", uploadRateLimit, uploadRateLimitWindow)
+	} else {
+		log.Printf("Upload rate limit: disabled")
+	}
 }
 
 func main() {
@@ -330,6 +351,19 @@ func downloadFile(w http.ResponseWriter, r *http.Request, fileName string) {
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
+	// 上传限流：单 IP 固定窗口计数
+	if uploadLimiter != nil {
+		clientIP := getClientIP(r)
+		if allowed, retryAfter := uploadLimiter.Allow(clientIP); !allowed {
+			log.Printf("[Rate Limit] Blocked upload from ip=%s", clientIP)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprintf(w, "Upload rate limit exceeded, please retry after %d seconds.\n上传过于频繁，请在 %d 秒后重试。\n", retryAfter, retryAfter)
+			return
+		}
+	}
+
 	// 密码检查
 	if password != "" && !checkPassword(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -343,6 +377,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 		http.Error(w, fmt.Sprintf("Upload failed: file too large. Max size is %s.", formatBytes(maxUploadSize)), http.StatusRequestEntityTooLarge)
 		return
 	}
+	limitedBody := http.MaxBytesReader(w, r.Body, maxUploadSize)
 
 	// 获取过期时间
 	expirationHeader := r.Header.Get("X-Expiration-Seconds")
@@ -405,7 +440,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 
 	// 上传到 R2 (使用流式上传，不需要将整个文件加载到内存)
 	counter := &byteCounter{}
-	bodyReader := io.TeeReader(r.Body, counter)
+	bodyReader := io.TeeReader(limitedBody, counter)
 
 	uploadInput := &s3manager.UploadInput{
 		Bucket:      aws.String(bucketName),
@@ -417,6 +452,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 
 	_, err := uploader.Upload(uploadInput)
 	if err != nil {
+		if isRequestBodyTooLarge(err) {
+			http.Error(w, fmt.Sprintf("Upload failed: file too large. Max size is %s.", formatBytes(maxUploadSize)), http.StatusRequestEntityTooLarge)
+			return
+		}
+
 		log.Printf("Upload error: %v", err)
 		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
 		return
@@ -693,18 +733,39 @@ func (c *byteCounter) Total() int64 {
 	return c.total
 }
 
-func getClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			if ip := strings.TrimSpace(parts[0]); ip != "" {
-				return ip
-			}
-		}
+func isRequestBodyTooLarge(err error) bool {
+	if err == nil {
+		return false
 	}
 
-	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		return realIP
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return true
+	}
+
+	if awsErr, ok := err.(awserr.Error); ok {
+		return isRequestBodyTooLarge(awsErr.OrigErr())
+	}
+
+	return false
+}
+
+func getClientIP(r *http.Request) string {
+	// X-Real-IP 由 nginx sidecar 以覆盖方式设置，比追加式的 X-Forwarded-For 更可信；
+	// 无反代直接暴露时应设 TRUST_PROXY_HEADERS=false，仅使用连接地址
+	if trustProxyHeaders {
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			return realIP
+		}
+
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				if ip := strings.TrimSpace(parts[0]); ip != "" {
+					return ip
+				}
+			}
+		}
 	}
 
 	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && ip != "" {
@@ -712,4 +773,67 @@ func getClientIP(r *http.Request) string {
 	}
 
 	return r.RemoteAddr
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	entries map[string]*rateLimitEntry
+}
+
+type rateLimitEntry struct {
+	count       int
+	windowStart time.Time
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	rl := &rateLimiter{
+		limit:   limit,
+		window:  window,
+		entries: make(map[string]*rateLimitEntry),
+	}
+	go rl.cleanupLoop()
+	return rl
+}
+
+// Allow 报告该 IP 当前窗口内是否还可上传；拒绝时返回距窗口重置的秒数
+func (rl *rateLimiter) Allow(ip string) (bool, int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	entry, ok := rl.entries[ip]
+	if !ok || now.Sub(entry.windowStart) >= rl.window {
+		rl.entries[ip] = &rateLimitEntry{count: 1, windowStart: now}
+		return true, 0
+	}
+
+	if entry.count >= rl.limit {
+		retryAfter := int((rl.window - now.Sub(entry.windowStart) + time.Second - 1) / time.Second)
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		return false, retryAfter
+	}
+
+	entry.count++
+	return true, 0
+}
+
+// 定期清理过期窗口条目，防止 map 无限增长
+func (rl *rateLimiter) cleanupLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		rl.mu.Lock()
+		for ip, entry := range rl.entries {
+			if now.Sub(entry.windowStart) >= rl.window {
+				delete(rl.entries, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
 }

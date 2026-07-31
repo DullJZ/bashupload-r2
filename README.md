@@ -68,6 +68,7 @@ source ~/.bashrc
 - Custom expiration time support: Set file expiration to allow multiple downloads within specified time
 - Supports files up to 5GB in size (self-hosting can adjust this limit)
 - Support password setting for self-hosting
+- Per-IP upload rate limiting (default: 10 uploads per minute) to prevent abuse
 
 **Privacy Notice:** For your privacy and security, files are automatically deleted from our servers immediately after they are downloaded. Each file can only be downloaded once, **unless you set an expiration time**. When an expiration time is set, the file can be downloaded multiple times until it expires. Make sure to save the file locally after downloading, as the link will no longer work after the first download (for one-time downloads) or after expiration (for time-limited downloads).
 
@@ -82,6 +83,8 @@ Click the "Deploy to Cloudflare" button above to modify the configuration.
 `SHORT_URL_SERVICE` is the short URL service API endpoint (default is `https://suosuo.de/short`), you can change it to your own short URL service if needed. Only support [MyUrls](https://github.com/CareyWang/MyUrls).
 
 `PASSWORD` environment variable is the password that must be provided for upload and download. If password protection is not needed, it can be left blank.
+
+Uploads are rate-limited per client IP (default: 10 uploads per 60 seconds; requests over the limit receive HTTP 429). The Worker version configures this via the `[[ratelimits]]` binding in `wrangler.toml` (remove the binding to disable; requires a recent wrangler — older 4.x versions need the equivalent `[[unsafe.bindings]]` with `type = "ratelimit"` syntax). The Docker versions use the `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_LIMIT_WINDOW` environment variables (`UPLOAD_RATE_LIMIT=0` disables), plus `TRUST_PROXY_HEADERS=false` when the service is exposed directly without a reverse proxy.
 
 The final step of deployment may show a deployment failure error because the default configuration uses `bashupload.app` as the domain. In fact, the project has already been deployed successfully. You just need to bind your own domain in the Worker project settings.
 

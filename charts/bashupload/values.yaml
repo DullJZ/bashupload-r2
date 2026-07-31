@@ -33,6 +33,9 @@ config:
   allowLifetimeOverMaxAge: "false"
   shortUrlService: "https://suosuo.de/short"
   noCleanup: "true"                # Disable cleanup in K8s (handled externally)
+  uploadRateLimit: "10"            # Max uploads per IP per window, "0" to disable
+  uploadRateLimitWindow: "60"      # Rate limit window in seconds
+  trustProxyHeaders: "true"        # Trust X-Real-IP/X-Forwarded-For (nginx sidecar sets X-Real-IP)
 
 # Nginx configuration
 nginx:
