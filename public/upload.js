@@ -397,6 +397,14 @@ async function uploadText(text, maxRetries = 3) {
                     : 'Password error, please check that the password you entered matches the PASSWORD environment variable configured on the server';
                 showStatus(passwordErrorMsg, 'error');
                 return;
+            } else if (response.status === 429) {
+                // 限流不重试，避免加剧限流
+                hideProgress();
+                const rateLimitMsg = currentLang === 'zh'
+                    ? '上传过于频繁，请稍后再试'
+                    : 'Too many uploads, please try again later';
+                showStatus(rateLimitMsg, 'error');
+                return;
             } else {
                 throw new Error(`Server returned status ${response.status}`);
             }
@@ -900,10 +908,18 @@ async function uploadSimpleFile(file, maxRetries = 3) {
             } else if (response.status === 401) {
                 // Handle password error specifically
                 hideProgress();
-                const passwordErrorMsg = currentLang === 'zh' 
-                    ? '密码错误，请检查您输入的密码是否与服务器配置的PASSWORD环境变量相同' 
+                const passwordErrorMsg = currentLang === 'zh'
+                    ? '密码错误，请检查您输入的密码是否与服务器配置的PASSWORD环境变量相同'
                     : 'Password error, please check that the password you entered matches the PASSWORD environment variable configured on the server';
                 showStatus(passwordErrorMsg, 'error');
+                return;
+            } else if (response.status === 429) {
+                // 限流不重试，避免加剧限流
+                hideProgress();
+                const rateLimitMsg = currentLang === 'zh'
+                    ? '上传过于频繁，请稍后再试'
+                    : 'Too many uploads, please try again later';
+                showStatus(rateLimitMsg, 'error');
                 return;
             } else {
                 throw new Error(`Server returned status ${response.status}`);

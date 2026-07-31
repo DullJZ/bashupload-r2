@@ -276,6 +276,27 @@ export default {
       return new Response('Method Not Allowed\n', { status: 405 });
     }
 
+    // 上传限流：单 IP 固定频率（未配置 ratelimit 绑定时自动跳过）
+    if (env.UPLOAD_RATE_LIMITER) {
+      const clientIP = getClientIP(request);
+      try {
+        const { success } = await env.UPLOAD_RATE_LIMITER.limit({ key: clientIP });
+        if (!success) {
+          console.log(`[Rate Limit] Blocked upload from ip=${clientIP}`);
+          return new Response('Upload rate limit exceeded, please retry after 60 seconds.\n上传过于频繁，请在 60 秒后重试。\n', {
+            status: 429,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Retry-After': '60',
+            },
+          });
+        }
+      } catch (e) {
+        // 限流服务异常时放行（fail-open），避免限流故障导致上传不可用
+        console.error('Rate limiter error:', e);
+      }
+    }
+
     // 检查密码保护
     if (env.PASSWORD) {
       const authHeader = request.headers.get('Authorization');
@@ -304,11 +325,11 @@ export default {
       }
     }
 
+    const maxUploadSize = parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10);
+
     try {
       // 检查是否是 /short 路径，如果是则强制使用短链接
       const forceShortUrl = pathname === '/short' || pathname.startsWith('/short/');
-      // 获取最大上传大小（字节），默认 5GB
-      const maxUploadSize = parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10);
       // 检查 Content-Length
       const contentLengthHeader = request.headers.get('content-length');
       let parsedContentLength = null;
@@ -347,6 +368,7 @@ export default {
       }
 
       const fileName = `${randomId}${extension}`;
+      const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
 
       // 使用流式上传 - 直接传递 request.body 到 R2
       // 这样不会将整个文件加载到 Worker 内存中
@@ -361,7 +383,7 @@ export default {
         customMetadata.expirationSeconds = expirationTime.toString();
       }
 
-      const uploadResult = await env.R2_BUCKET.put(fileName, request.body, {
+      const uploadResult = await env.R2_BUCKET.put(fileName, limitedBody, {
         httpMetadata: {
           contentType: contentType,
         },
@@ -373,16 +395,10 @@ export default {
           ? uploadResult.size
           : typeof parsedContentLength === 'number'
             ? parsedContentLength
-            : null;
+            : getBytesRead();
       const sizeLabel =
         typeof uploadedSize === 'number' ? formatBytes(uploadedSize) : 'unknown';
-      const xForwardedFor = request.headers.get('X-Forwarded-For');
-      const forwardedIP = xForwardedFor ? xForwardedFor.split(',')[0].trim() : '';
-      const clientIP =
-        request.headers.get('CF-Connecting-IP') ||
-        request.headers.get('X-Real-IP') ||
-        forwardedIP ||
-        'unknown';
+      const clientIP = getClientIP(request);
 
       console.log(`[Upload] key=${fileName} size=${sizeLabel} ip=${clientIP} oneTime=${isOneTime}`);
 
@@ -445,6 +461,15 @@ export default {
         },
       });
     } catch (e) {
+      if (isUploadTooLargeError(e)) {
+        return new Response(`Upload failed: file too large. Max size is ${formatBytes(maxUploadSize)}.\n`, {
+          status: 413,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+          },
+        });
+      }
+
       console.error('Upload error:', e);
       return new Response(`Upload failed: ${e.message}\n`, {
         status: 500,
@@ -483,6 +508,18 @@ function generateRandomId() {
   return result;
 }
 
+// 获取客户端 IP（CF-Connecting-IP 由 Cloudflare 边缘设置，不可伪造）
+function getClientIP(request) {
+  const xForwardedFor = request.headers.get('X-Forwarded-For');
+  const forwardedIP = xForwardedFor ? xForwardedFor.split(',')[0].trim() : '';
+  return (
+    request.headers.get('CF-Connecting-IP') ||
+    request.headers.get('X-Real-IP') ||
+    forwardedIP ||
+    'unknown'
+  );
+}
+
 // 格式化字节数为可读字符串
 function formatBytes(bytes) {
   if (bytes === 0) return '0B';
@@ -490,4 +527,81 @@ function formatBytes(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + sizes[i];
+}
+
+class UploadTooLargeError extends Error {
+  constructor(maxBytes) {
+    super(`Upload failed: file too large. Max size is ${formatBytes(maxBytes)}.`);
+    this.name = 'UploadTooLargeError';
+    this.maxBytes = maxBytes;
+  }
+}
+
+function isUploadTooLargeError(error) {
+  if (!error) {
+    return false;
+  }
+
+  if (error instanceof UploadTooLargeError || error.name === 'UploadTooLargeError') {
+    return true;
+  }
+
+  return isUploadTooLargeError(error.cause);
+}
+
+function createSizeLimitedStream(stream, maxBytes) {
+  if (!stream) {
+    return {
+      stream,
+      getBytesRead: () => 0,
+    };
+  }
+
+  let bytesRead = 0;
+  let streamClosed = false;
+  const reader = stream.getReader();
+
+  const limitedStream = new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        streamClosed = true;
+        controller.close();
+        return;
+      }
+
+      const chunkSize = value?.byteLength ?? value?.length ?? 0;
+      bytesRead += chunkSize;
+
+      if (bytesRead > maxBytes) {
+        const error = new UploadTooLargeError(maxBytes);
+        streamClosed = true;
+
+        try {
+          await reader.cancel(error);
+        } catch (cancelError) {
+          console.warn('Failed to cancel oversized upload stream:', cancelError);
+        }
+
+        controller.error(error);
+        return;
+      }
+
+      controller.enqueue(value);
+    },
+    async cancel(reason) {
+      if (streamClosed) {
+        return;
+      }
+
+      streamClosed = true;
+      await reader.cancel(reason);
+    },
+  });
+
+  return {
+    stream: limitedStream,
+    getBytesRead: () => bytesRead,
+  };
 }
