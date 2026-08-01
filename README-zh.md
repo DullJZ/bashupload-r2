@@ -79,7 +79,7 @@ source ~/.bashrc
 
 其中，`MAX_UPLOAD_SIZE`单位为字节（默认为 5GB），`MAX_AGE`单位为秒（默认为 1小时），可以根据需要进行调整。
 
-`MAX_AGE_FOR_MULTIDOWNLOAD` 是允许多次下载的最大有效期时间，单位为秒（默认值是86400，即24小时）。用户可以设置不超过此限制的自定义有效期。
+`MAX_AGE_FOR_MULTIDOWNLOAD` 是允许多次下载的最大有效期时间，单位为秒（默认值是86400，即24小时）。用户可以设置不超过此限制的自定义有效期。此限制在服务端强制执行：超过限制的有效期（例如直接通过 `X-Expiration-Seconds` 头设置）会被自动调整为此值，除非 `ALLOW_LIFETIME_OVER_MAX_AGE` 设置为 `true`。
 
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
 

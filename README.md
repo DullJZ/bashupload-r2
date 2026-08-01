@@ -78,7 +78,7 @@ Click the "Deploy to Cloudflare" button above to modify the configuration.
 
 `MAX_UPLOAD_SIZE` is in bytes (default is 5GB), and `MAX_AGE` is in seconds (default is 1 hour). You can adjust these values as needed.
 
-`MAX_AGE_FOR_MULTIDOWNLOAD` is the maximum expiration time allowed for multiple downloads in seconds (default is 86400, which is 24 hours). Users can set custom expiration times up to this limit.
+`MAX_AGE_FOR_MULTIDOWNLOAD` is the maximum expiration time allowed for multiple downloads in seconds (default is 86400, which is 24 hours). Users can set custom expiration times up to this limit. This limit is enforced server-side: expiration times exceeding it (e.g. sent directly via `X-Expiration-Seconds`) are automatically reduced to this value unless `ALLOW_LIFETIME_OVER_MAX_AGE` is `true`.
 
 `SHORT_URL_SERVICE` is the short URL service API endpoint (default is `https://suosuo.de/short`), you can change it to your own short URL service if needed. Only support [MyUrls](https://github.com/CareyWang/MyUrls).
 

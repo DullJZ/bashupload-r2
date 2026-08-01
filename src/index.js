@@ -10,6 +10,8 @@ export default {
 
     // 获取 MAX_AGE 配置（秒），默认 3600 秒（1小时）
     const maxAge = parseInt(env.MAX_AGE || '3600', 10);
+    const maxAgeForMultiDownload = parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10);
+    const allowLifetimeOverMaxAge = env.ALLOW_LIFETIME_OVER_MAX_AGE === 'true';
     const now = Date.now();
 
     console.log(`[Scheduled Task] Start cleaning expired files, MAX_AGE: ${maxAge}s`);
@@ -44,7 +46,15 @@ export default {
                 const expirationTime = fileInfo.customMetadata?.expirationTime;
                 if (expirationTime) {
                   const now = new Date().getTime();
-                  const expireAt = new Date(expirationTime).getTime();
+                  let expireAt = new Date(expirationTime).getTime();
+                  // 兜底：即使元数据里的过期时间超长（如限制调整前上传的文件），
+                  // 也按上传时间 + MAX_AGE_FOR_MULTIDOWNLOAD 强制封顶
+                  if (!allowLifetimeOverMaxAge) {
+                    const uploadTime = fileInfo.customMetadata?.uploadTime
+                      ? new Date(fileInfo.customMetadata.uploadTime).getTime()
+                      : fileInfo.uploaded.getTime();
+                    expireAt = Math.min(expireAt, uploadTime + maxAgeForMultiDownload * 1000);
+                  }
                   if (now > expireAt) {
                     await env.R2_BUCKET.delete(object.key);
                     console.log(`[Scheduled Task] Deleted expired file: ${object.key}, expiration: ${expirationTime}`);
@@ -221,7 +231,15 @@ export default {
           // 如果有过期时间，检查是否已经过期
           if (expirationTime) {
             const now = new Date().getTime();
-            const expireAt = new Date(expirationTime).getTime();
+            let expireAt = new Date(expirationTime).getTime();
+            // 兜底：按上传时间 + MAX_AGE_FOR_MULTIDOWNLOAD 强制封顶
+            if (env.ALLOW_LIFETIME_OVER_MAX_AGE !== 'true') {
+              const maxMulti = parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10);
+              const uploadTime = fileInfo.customMetadata?.uploadTime
+                ? new Date(fileInfo.customMetadata.uploadTime).getTime()
+                : fileInfo.uploaded.getTime();
+              expireAt = Math.min(expireAt, uploadTime + maxMulti * 1000);
+            }
             if (now > expireAt) {
               // 文件已过期，删除并返回404
               await env.R2_BUCKET.delete(fileName);
@@ -349,7 +367,16 @@ export default {
       // 获取有效期参数（秒）
       const expirationSeconds = request.headers.get('X-Expiration-Seconds');
       const hasExpiration = expirationSeconds && !isNaN(parseInt(expirationSeconds, 10)) && parseInt(expirationSeconds, 10) > 0;
-      const expirationTime = hasExpiration ? parseInt(expirationSeconds, 10) : null;
+      let expirationTime = hasExpiration ? parseInt(expirationSeconds, 10) : null;
+
+      // 服务端强制限制有效期上限，防止绕过前端设置超长有效期
+      const maxAgeForMultiDownload = parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10);
+      const allowLifetimeOverMaxAge = env.ALLOW_LIFETIME_OVER_MAX_AGE === 'true';
+      let expirationLimited = false;
+      if (hasExpiration && !allowLifetimeOverMaxAge && expirationTime > maxAgeForMultiDownload) {
+        expirationTime = maxAgeForMultiDownload;
+        expirationLimited = true;
+      }
       const isOneTime = !hasExpiration;
 
       // 生成随机文件名
@@ -449,6 +476,9 @@ export default {
           ? `${expirationHours}小时${expirationMinutes > 0 ? expirationMinutes + '分钟' : ''}`
           : `${expirationMinutes}分钟`;
         responseText = `\n\n${fileUrl}\n\n🕐 注意：此文件将在 ${expirationString} 后过期，期间可以多次下载。\n   Note: This file will expire after ${expirationString} and can be downloaded multiple times.\n`;
+        if (expirationLimited) {
+          responseText += `⚠️  请求的有效期超过服务器上限，已调整为 ${expirationString}。\n   Requested expiration exceeded the server limit and was reduced to ${expirationString}.\n`;
+        }
       } else {
         responseText = `\n\n${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
       }

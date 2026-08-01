@@ -106,7 +106,7 @@ curl http://localhost:3000/short -T test.txt
 
 - `MAX_UPLOAD_SIZE`: 最大上传大小（字节），默认 5GB
 - `MAX_AGE`: 文件最大保存时间（秒），默认 3600（1小时）
-- `MAX_AGE_FOR_MULTIDOWNLOAD`: 多次下载模式下的最大保存时间（秒），默认 86400（24小时）
+- `MAX_AGE_FOR_MULTIDOWNLOAD`: 多次下载模式下的最大保存时间（秒），默认 86400（24小时）。服务端强制执行，超过限制的有效期会被自动调整为此值（除非启用 `ALLOW_LIFETIME_OVER_MAX_AGE`）
 - `ENABLE_SHORT_URL`: 是否启用短链接，默认 `false`
 - `ALLOW_LIFETIME_OVER_MAX_AGE`: 是否允许超过 MAX_AGE 的过期时间，默认 `false`
 - `PASSWORD`: 上传密码保护（可选）

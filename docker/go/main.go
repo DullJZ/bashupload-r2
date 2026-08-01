@@ -281,6 +281,13 @@ func downloadFile(w http.ResponseWriter, r *http.Request, fileName string) {
 	// 检查过期时间
 	if headOutput.Metadata["Expirationtime"] != nil {
 		expirationTime, err := time.Parse(time.RFC3339, *headOutput.Metadata["Expirationtime"])
+		if err == nil {
+			lastModified := time.Now()
+			if headOutput.LastModified != nil {
+				lastModified = *headOutput.LastModified
+			}
+			expirationTime = capExpirationTime(expirationTime, headOutput.Metadata, lastModified)
+		}
 		if err == nil && time.Now().After(expirationTime) {
 			// 文件已过期，删除
 			deleteInput := &s3.DeleteObjectInput{
@@ -384,13 +391,19 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 	var expirationTime *time.Time
 	var expirationSeconds int64
 	hasExpiration := false
+	expirationLimited := false
 
 	if expirationHeader != "" {
 		expSec, err := strconv.ParseInt(expirationHeader, 10, 64)
 		if err == nil && expSec > 0 {
 			hasExpiration = true
 			expirationSeconds = expSec
-			expTime := time.Now().Add(time.Duration(expSec) * time.Second)
+			// 服务端强制限制有效期上限，防止绕过前端设置超长有效期
+			if !allowLifetimeOverMaxAge && expirationSeconds > maxAgeForMultiDownload {
+				expirationSeconds = maxAgeForMultiDownload
+				expirationLimited = true
+			}
+			expTime := time.Now().Add(time.Duration(expirationSeconds) * time.Second)
 			expirationTime = &expTime
 		}
 	}
@@ -502,6 +515,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 			expirationString = fmt.Sprintf("%d分钟", minutes)
 		}
 		responseText = fmt.Sprintf("\n\n%s\n\n🕐 注意：此文件将在 %s 后过期，期间可以多次下载。\n   Note: This file will expire after %s and can be downloaded multiple times.\n", fileURL, expirationString, expirationString)
+		if expirationLimited {
+			responseText += fmt.Sprintf("⚠️  请求的有效期超过服务器上限，已调整为 %s。\n   Requested expiration exceeded the server limit and was reduced to %s.\n", expirationString, expirationString)
+		}
 	} else {
 		responseText = fmt.Sprintf("\n\n%s\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n", fileURL)
 	}
@@ -579,6 +595,9 @@ func cleanupExpiredFiles() {
 				// 检查自定义过期时间
 				if headOutput.Metadata["Expirationtime"] != nil {
 					expirationTime, err := time.Parse(time.RFC3339, *headOutput.Metadata["Expirationtime"])
+					if err == nil {
+						expirationTime = capExpirationTime(expirationTime, headOutput.Metadata, lastModified)
+					}
 					if err == nil && now.After(expirationTime) {
 						deleteInput := &s3.DeleteObjectInput{
 							Bucket: aws.String(bucketName),
@@ -674,6 +693,25 @@ func formatBytes(bytes int64) string {
 	}
 	sizes := []string{"B", "KB", "MB", "GB", "TB"}
 	return fmt.Sprintf("%.2f%s", float64(bytes)/float64(div), sizes[exp+1])
+}
+
+// capExpirationTime 按上传时间 + MAX_AGE_FOR_MULTIDOWNLOAD 强制封顶，
+// 用于兜底处理限制调整前上传的超长有效期文件
+func capExpirationTime(expireAt time.Time, metadata map[string]*string, lastModified time.Time) time.Time {
+	if allowLifetimeOverMaxAge {
+		return expireAt
+	}
+	uploadTime := lastModified
+	if metadata["Uploadtime"] != nil {
+		if t, err := time.Parse(time.RFC3339, *metadata["Uploadtime"]); err == nil {
+			uploadTime = t
+		}
+	}
+	capAt := uploadTime.Add(time.Duration(maxAgeForMultiDownload) * time.Second)
+	if capAt.Before(expireAt) {
+		return capAt
+	}
+	return expireAt
 }
 
 func parseInt64(s string, defaultValue int64) int64 {
