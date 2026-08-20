@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,15 @@ type configResponse struct {
 	MaxUploadSize          int64 `json:"maxUploadSize"`
 	MaxAge                 int64 `json:"maxAge"`
 	NeedPassword           bool  `json:"needPassword"`
+	EnableDedup            bool  `json:"enableDedup"`
+}
+
+type hashPrecheckResponse struct {
+	Exists           bool   `json:"exists"`
+	Hit              bool   `json:"hit"`
+	URL              string `json:"url"`
+	ExpiresAt        string `json:"expiresAt"`
+	RemainingSeconds int64  `json:"remainingSeconds"`
 }
 
 var (
@@ -53,6 +64,7 @@ var (
 	uploadRateLimitWindow   int64
 	trustProxyHeaders       bool
 	uploadLimiter           *rateLimiter
+	enableDedup             bool
 )
 
 //go:embed public/*
@@ -72,6 +84,7 @@ func init() {
 	maxAgeForMultiDownload = parseInt64(os.Getenv("MAX_AGE_FOR_MULTIDOWNLOAD"), 86400)
 	enableShortURL = os.Getenv("ENABLE_SHORT_URL") == "true"
 	allowLifetimeOverMaxAge = os.Getenv("ALLOW_LIFETIME_OVER_MAX_AGE") == "true"
+	enableDedup = os.Getenv("ENABLE_DEDUP") != "false"
 	password = os.Getenv("PASSWORD")
 	shortURLService = os.Getenv("SHORT_URL_SERVICE")
 	if shortURLService == "" {
@@ -115,6 +128,7 @@ func init() {
 	} else {
 		log.Printf("Upload rate limit: disabled")
 	}
+	log.Printf("Expiration-mode hash deduplication: %t", enableDedup)
 }
 
 func main() {
@@ -140,6 +154,7 @@ func main() {
 	// 设置路由
 	http.HandleFunc("/", handleRequest)
 	http.HandleFunc("/api/config", handleConfig)
+	http.HandleFunc("/api/hash/", handleHashPrecheck)
 	http.HandleFunc("/short", handleShort)
 	http.HandleFunc("/short/", handleShort)
 
@@ -155,6 +170,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		MaxUploadSize:          maxUploadSize,
 		MaxAge:                 maxAge,
 		NeedPassword:           password != "",
+		EnableDedup:            enableDedup,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -163,6 +179,49 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 	json.NewEncoder(w).Encode(config)
+}
+
+func handleHashPrecheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	shaHex := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/hash/")))
+	if !isValidSHA256Hex(shaHex) {
+		http.Error(w, "Invalid SHA-256 hash", http.StatusBadRequest)
+		return
+	}
+	if !enableDedup {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	// Precheck remains public; upload and download password protection stays unchanged.
+
+	key := contentHashKey(shaHex)
+	headOutput, err := headObject(key)
+	if err != nil {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	expirationTime, live := liveExpiration(headOutput)
+	if !live {
+		deleteObject(key)
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(hashPrecheckResponse{
+		Exists:           true,
+		Hit:              true,
+		URL:              absoluteFileURL(r, key),
+		ExpiresAt:        expirationTime.Format(time.RFC3339),
+		RemainingSeconds: int64(time.Until(expirationTime).Seconds()),
+	})
 }
 
 func handleShort(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +375,9 @@ func downloadFile(w http.ResponseWriter, r *http.Request, fileName string) {
 
 	// 设置响应头
 	contentType := "application/octet-stream"
-	if mtype := mimetype.Lookup(fileName); mtype != nil {
+	if strings.HasPrefix(fileName, "c/") && headOutput.ContentType != nil && *headOutput.ContentType != "" {
+		contentType = *headOutput.ContentType
+	} else if mtype := mimetype.Lookup(fileName); mtype != nil {
 		contentType = mtype.String()
 	} else if headOutput.ContentType != nil {
 		contentType = *headOutput.ContentType
@@ -451,6 +512,14 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 		metadata["Onetime"] = aws.String("true")
 	}
 
+	if enableDedup && hasExpiration {
+		shaHex := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Content-SHA256")))
+		if isValidSHA256Hex(shaHex) {
+			handleDedupUpload(w, r, limitedBody, shaHex, contentType, metadata, expirationTime, expirationSeconds, expirationLimited, forceShortURL, contentLength)
+			return
+		}
+	}
+
 	// 上传到 R2 (使用流式上传，不需要将整个文件加载到内存)
 	counter := &byteCounter{}
 	bodyReader := io.TeeReader(limitedBody, counter)
@@ -532,6 +601,125 @@ func handleUpload(w http.ResponseWriter, r *http.Request, forceShortURL bool) {
 	fmt.Fprint(w, responseText)
 }
 
+func handleDedupUpload(w http.ResponseWriter, r *http.Request, body io.Reader, shaHex, contentType string, metadata map[string]*string, requestedExpiration *time.Time, expirationSeconds int64, expirationLimited bool, forceShortURL bool, contentLength int64) {
+	key := contentHashKey(shaHex)
+	metadata["Contenthash"] = aws.String(shaHex)
+
+	if headOutput, err := headObject(key); err == nil {
+		if existingExpiration, live := liveExpiration(headOutput); live {
+			if !existingExpiration.Before(*requestedExpiration) {
+				log.Printf("[Dedup Hit] key=%s hash=%s existingExpiration=%s", key, shaHex, existingExpiration.Format(time.RFC3339))
+				writeDedupUploadResponse(w, r, key, expirationSeconds, expirationLimited, forceShortURL, true, false)
+				return
+			}
+
+			tempKey := tempObjectKey()
+			uploadedBytes, ok := uploadAndVerifyHash(w, body, tempKey, contentType, metadata, shaHex, contentLength)
+			if !ok {
+				deleteObject(tempKey)
+				return
+			}
+
+			if err := copyObject(tempKey, key, contentType, metadata); err != nil {
+				deleteObject(tempKey)
+				log.Printf("Dedup extension copy error: %v", err)
+				http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
+				return
+			}
+			deleteObject(tempKey)
+			log.Printf("[Dedup Extended] key=%s hash=%s size=%s ip=%s", key, shaHex, formatBytes(uploadedBytes), getClientIP(r))
+			writeDedupUploadResponse(w, r, key, expirationSeconds, expirationLimited, forceShortURL, true, true)
+			return
+		}
+
+		deleteObject(key)
+	} else if !isObjectNotFound(err) {
+		log.Printf("Dedup head error: %v", err)
+		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	uploadedBytes, ok := uploadAndVerifyHash(w, body, key, contentType, metadata, shaHex, contentLength)
+	if !ok {
+		deleteObject(key)
+		return
+	}
+
+	log.Printf("[Dedup Upload] key=%s hash=%s size=%s ip=%s", key, shaHex, formatBytes(uploadedBytes), getClientIP(r))
+	writeDedupUploadResponse(w, r, key, expirationSeconds, expirationLimited, forceShortURL, false, false)
+}
+
+func uploadAndVerifyHash(w http.ResponseWriter, body io.Reader, key, contentType string, metadata map[string]*string, expectedSHA string, contentLength int64) (int64, bool) {
+	counter := &byteCounter{}
+	h := sha256.New()
+	bodyReader := io.TeeReader(body, io.MultiWriter(counter, h))
+
+	_, err := uploader.Upload(&s3manager.UploadInput{
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(key),
+		Body:        bodyReader,
+		ContentType: aws.String(contentType),
+		Metadata:    metadata,
+	})
+	if err != nil {
+		if isRequestBodyTooLarge(err) {
+			http.Error(w, fmt.Sprintf("Upload failed: file too large. Max size is %s.", formatBytes(maxUploadSize)), http.StatusRequestEntityTooLarge)
+			return 0, false
+		}
+		log.Printf("Upload error: %v", err)
+		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
+		return 0, false
+	}
+
+	uploadedBytes := counter.Total()
+	if uploadedBytes == 0 && contentLength > 0 {
+		uploadedBytes = contentLength
+	}
+	computed := hex.EncodeToString(h.Sum(nil))
+	if computed != expectedSHA {
+		log.Printf("[Dedup Hash Mismatch] key=%s expected=%s computed=%s", key, expectedSHA, computed)
+		http.Error(w, "SHA-256 mismatch; uploaded content does not match X-Content-SHA256.", http.StatusConflict)
+		return uploadedBytes, false
+	}
+
+	return uploadedBytes, true
+}
+
+func writeDedupUploadResponse(w http.ResponseWriter, r *http.Request, key string, expirationSeconds int64, expirationLimited bool, forceShortURL bool, hit bool, extended bool) {
+	fileURL := absoluteFileURL(r, key)
+	if forceShortURL || enableShortURL {
+		shortURL, err := generateShortURL(fileURL)
+		if err == nil && shortURL != "" {
+			fileURL = shortURL
+			log.Printf("Generated short URL: %s", fileURL)
+		} else if err != nil {
+			log.Printf("Failed to generate short URL: %v", err)
+		}
+	}
+
+	expirationString := formatExpirationDuration(expirationSeconds)
+	statusLine := "♻️  检测到相同文件，已复用现有存储对象。\n   Deduplication hit: reused the existing stored file.\n"
+	if extended {
+		statusLine = "♻️  检测到相同文件，已验证内容并延长有效期。\n   Deduplication hit: verified content and extended expiration.\n"
+	} else if !hit {
+		statusLine = "✅ 文件已按内容哈希保存，后续相同文件可复用。\n   File saved by content hash; matching future uploads can be reused.\n"
+	}
+
+	responseText := fmt.Sprintf("\n\n%s\n\n%s🕐 注意：此文件将在 %s 后过期，期间可以多次下载。\n   Note: This file will expire after %s and can be downloaded multiple times.\n", fileURL, statusLine, expirationString, expirationString)
+	if expirationLimited {
+		responseText += fmt.Sprintf("⚠️  请求的有效期超过服务器上限，已调整为 %s。\n   Requested expiration exceeded the server limit and was reduced to %s.\n", expirationString, expirationString)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-One-Time-Upload", "false")
+	w.Header().Set("X-Dedup-Hit", strconv.FormatBool(hit))
+	if extended {
+		w.Header().Set("X-Dedup-Extended", "true")
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, responseText)
+}
+
 func generateShortURL(longURL string) (string, error) {
 	base64URL := base64.StdEncoding.EncodeToString([]byte(longURL))
 	data := url.Values{}
@@ -578,6 +766,17 @@ func cleanupExpiredFiles() {
 	err := s3Client.ListObjectsV2Pages(listInput, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
 		for _, obj := range page.Contents {
 			checkedCount++
+			if obj.Key != nil && strings.HasPrefix(*obj.Key, "t/") && obj.LastModified != nil && now.Sub(*obj.LastModified) > time.Hour {
+				deleteInput := &s3.DeleteObjectInput{
+					Bucket: aws.String(bucketName),
+					Key:    obj.Key,
+				}
+				if _, err := s3Client.DeleteObject(deleteInput); err == nil {
+					log.Printf("[Scheduled Task] Deleted stale temp object: %s", *obj.Key)
+					deletedCount++
+				}
+				continue
+			}
 
 			go func(key string, lastModified time.Time) {
 				// 获取文件元数据
@@ -758,6 +957,93 @@ func determineExtension(contentType string) string {
 	return ""
 }
 
+func isValidSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+func contentHashKey(shaHex string) string {
+	return "c/" + strings.ToLower(shaHex)
+}
+
+func tempObjectKey() string {
+	return "t/" + generateRandomID() + generateRandomID()
+}
+
+func headObject(key string) (*s3.HeadObjectOutput, error) {
+	return s3Client.HeadObject(&s3.HeadObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+}
+
+func deleteObject(key string) {
+	_, err := s3Client.DeleteObject(&s3.DeleteObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		log.Printf("Delete object failed key=%s err=%v", key, err)
+	}
+}
+
+func copyObject(sourceKey, destKey, contentType string, metadata map[string]*string) error {
+	copySource := url.PathEscape(bucketName) + "/" + url.PathEscape(sourceKey)
+	_, err := s3Client.CopyObject(&s3.CopyObjectInput{
+		Bucket:            aws.String(bucketName),
+		Key:               aws.String(destKey),
+		CopySource:        aws.String(copySource),
+		ContentType:       aws.String(contentType),
+		Metadata:          metadata,
+		MetadataDirective: aws.String("REPLACE"),
+	})
+	return err
+}
+
+func liveExpiration(headOutput *s3.HeadObjectOutput) (time.Time, bool) {
+	if headOutput == nil || headOutput.Metadata == nil || headOutput.Metadata["Expirationtime"] == nil {
+		return time.Time{}, false
+	}
+	expirationTime, err := time.Parse(time.RFC3339, *headOutput.Metadata["Expirationtime"])
+	if err != nil {
+		return time.Time{}, false
+	}
+	lastModified := time.Now()
+	if headOutput.LastModified != nil {
+		lastModified = *headOutput.LastModified
+	}
+	expirationTime = capExpirationTime(expirationTime, headOutput.Metadata, lastModified)
+	return expirationTime, time.Now().Before(expirationTime)
+}
+
+func absoluteFileURL(r *http.Request, key string) string {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s/%s", scheme, r.Host, key)
+}
+
+func formatExpirationDuration(expirationSeconds int64) string {
+	hours := expirationSeconds / 3600
+	minutes := (expirationSeconds % 3600) / 60
+	seconds := expirationSeconds % 60
+	if hours > 0 {
+		result := fmt.Sprintf("%d小时", hours)
+		if minutes > 0 {
+			result += fmt.Sprintf("%d分钟", minutes)
+		}
+		return result
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%d分钟", minutes)
+	}
+	return fmt.Sprintf("%d秒", seconds)
+}
+
 type byteCounter struct {
 	total int64
 }
@@ -785,6 +1071,17 @@ func isRequestBodyTooLarge(err error) bool {
 		return isRequestBodyTooLarge(awsErr.OrigErr())
 	}
 
+	return false
+}
+
+func isObjectNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if awsErr, ok := err.(awserr.Error); ok {
+		code := awsErr.Code()
+		return code == s3.ErrCodeNoSuchKey || code == "NotFound" || code == "NoSuchKey" || code == "404"
+	}
 	return false
 }
 

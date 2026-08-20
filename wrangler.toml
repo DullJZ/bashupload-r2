@@ -30,6 +30,7 @@ SHORT_URL_SERVICE = "https://suosuo.de/short"
 PASSWORD = ""
 MAX_AGE_FOR_MULTIDOWNLOAD = "86400"
 NO_CLEANUP = "false"
+ENABLE_DEDUP = "true"
 
 # 静态文件
 [assets]
@@ -44,6 +45,5 @@ enabled = true
 # 定时任务 - 每5分钟执行一次清理
 [triggers]
 crons = ["*/5 * * * *"]
-
 
 

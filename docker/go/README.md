@@ -108,6 +108,7 @@ curl http://localhost:3000/short -T test.txt
 - `MAX_AGE`: 文件最大保存时间（秒），默认 3600（1小时）
 - `MAX_AGE_FOR_MULTIDOWNLOAD`: 多次下载模式下的最大保存时间（秒），默认 86400（24小时）。服务端强制执行，超过限制的有效期会被自动调整为此值（除非启用 `ALLOW_LIFETIME_OVER_MAX_AGE`）
 - `ENABLE_SHORT_URL`: 是否启用短链接，默认 `false`
+- `ENABLE_DEDUP`: 是否启用多次下载（过期时间）上传的 SHA-256 内容哈希去重，默认 `true`；仅当值严格为 `false` 时禁用。一次性上传不会去重，仍使用随机文件名
 - `ALLOW_LIFETIME_OVER_MAX_AGE`: 是否允许超过 MAX_AGE 的过期时间，默认 `false`
 - `PASSWORD`: 上传密码保护（可选）
 - `SHORT_URL_SERVICE`: 短链接服务地址，默认 `https://suosuo.de/short`
@@ -115,6 +116,36 @@ curl http://localhost:3000/short -T test.txt
 - `UPLOAD_RATE_LIMIT`: 单 IP 每窗口最大上传次数，`0` 禁用，默认 10
 - `UPLOAD_RATE_LIMIT_WINDOW`: 上传限流窗口时长（秒），默认 60
 - `TRUST_PROXY_HEADERS`: 是否信任 `X-Real-IP`/`X-Forwarded-For` 识别客户端 IP，默认 `true`；服务直接暴露公网（无反向代理）时设为 `false`，防止伪造头绕过限流
+
+### SHA-256 内容哈希去重
+
+去重仅适用于带有效过期时间的上传（`X-Expiration-Seconds > 0`）。一次性上传始终保持随机对象 key，绝不会复用已有对象。
+
+客户端可在上传时提供 64 位十六进制 `X-Content-SHA256` 头：
+
+```bash
+SHA=$(sha256sum file.txt | cut -d ' ' -f1)
+curl -H "X-Expiration-Seconds: 3600" \
+     -H "X-Content-SHA256: ${SHA}" \
+     http://localhost:3000 -T file.txt
+```
+
+行为说明：
+
+- 未提供或提供无效 `X-Content-SHA256` 时，使用原有上传流程。
+- 去重内容存储在 `c/<sha256hex>`；临时校验对象使用 `t/` 前缀。
+- 如已有同 hash 文件仍有效且过期时间不早于本次请求，服务直接返回已有 URL，不读取请求体，并返回 `X-Dedup-Hit: true`。
+- 如已有同 hash 文件有效但本次请求需要更晚过期时间，服务会先把新请求体写入临时对象并校验 SHA-256，校验通过后再替换/延长 `c/<hash>` 元数据；校验失败返回 `409 Conflict` 且保留原对象。
+- 如不存在或已过期，服务流式写入 `c/<hash>`，写入后校验 hash；不匹配时删除对象并返回 `409 Conflict`。
+- 定时清理会删除过期内容对象，并清理 1 小时以上的 `t/` 临时对象。
+
+预检端点：
+
+```bash
+curl http://localhost:3000/api/hash/${SHA}
+```
+
+命中时返回 JSON：`exists=true`、`hit=true`、`url`、`expiresAt`、`remainingSeconds`。无效 hash 返回 `400`，缺失或已过期返回 `404`。该端点与 `/api/config` 一样公开，不要求密码；这会暴露“某个已知 hash 是否存在”的信息，请根据隐私需求决定是否启用 `ENABLE_DEDUP`。
 
 ## 性能调优
 

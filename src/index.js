@@ -1,4 +1,6 @@
 import mime from 'mime';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 
 export default {
   // 处理定时任务
@@ -42,6 +44,21 @@ export default {
               const fileInfo = await env.R2_BUCKET.head(object.key);
 
               if (fileInfo) {
+                if (object.key.startsWith('t/')) {
+                  const uploadTime = fileInfo.customMetadata?.uploadTime
+                    ? new Date(fileInfo.customMetadata.uploadTime).getTime()
+                    : fileInfo.uploaded.getTime();
+                  const age = now - uploadTime;
+
+                  if (age > 60 * 60 * 1000) {
+                    await env.R2_BUCKET.delete(object.key);
+                    console.log(`[Scheduled Task] Deleted stale temp object: ${object.key}`);
+                    return true;
+                  }
+
+                  return false;
+                }
+
                 // 检查文件是否有自定义的过期时间
                 const expirationTime = fileInfo.customMetadata?.expirationTime;
                 if (expirationTime) {
@@ -129,6 +146,32 @@ export default {
             'Access-Control-Allow-Headers': 'Content-Type'
           }
         });
+      }
+
+      if (pathname.startsWith('/api/hash/')) {
+        const hash = pathname.substring('/api/hash/'.length).toLowerCase();
+        if (!isValidSha256Hex(hash)) {
+          return jsonResponse({ error: 'Invalid SHA-256 hash' }, 400);
+        }
+
+        const key = getDedupKey(hash);
+        const fileInfo = await env.R2_BUCKET.head(key);
+        const liveExpiration = getLiveExpiration(fileInfo, env);
+
+        if (!liveExpiration.live) {
+          if (fileInfo) {
+            ctx.waitUntil(env.R2_BUCKET.delete(key));
+          }
+          return jsonResponse({ exists: false }, 404);
+        }
+
+        return jsonResponse({
+          exists: true,
+          url: makeFileUrl(request, key),
+          key,
+          expiresAt: new Date(liveExpiration.expiresAt).toISOString(),
+          remainingSeconds: Math.max(0, Math.floor((liveExpiration.expiresAt - Date.now()) / 1000)),
+        }, 200);
       }
 
       // 根路径处理
@@ -219,8 +262,8 @@ export default {
           object.writeHttpMetadata(headers);
           headers.set('etag', object.httpEtag);
 
-          // 使用 mime.js 根据文件名获取 Content-Type
-          const contentType = mime.getType(fileName) || 'application/octet-stream';
+          // 优先使用 R2 中保存的 Content-Type，再根据文件名猜测
+          const contentType = headers.get('Content-Type') || mime.getType(fileName) || 'application/octet-stream';
           headers.set('Content-Type', contentType);
 
           // 检查文件元数据，确定是否是有效期模式
@@ -379,8 +422,10 @@ export default {
       }
       const isOneTime = !hasExpiration;
 
-      // 生成随机文件名
-      const randomId = generateRandomId();
+      const enableDedup = env.ENABLE_DEDUP !== 'false';
+      const requestedHash = (request.headers.get('X-Content-SHA256') || '').toLowerCase();
+      const canDedup = enableDedup && hasExpiration && isValidSha256Hex(requestedHash);
+
       let contentType = request.headers.get('content-type') || 'application/octet-stream';
       let extension = '';
 
@@ -394,11 +439,6 @@ export default {
         extension = ext ? `.${ext}` : '';
       }
 
-      const fileName = `${randomId}${extension}`;
-      const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
-
-      // 使用流式上传 - 直接传递 request.body 到 R2
-      // 这样不会将整个文件加载到 Worker 内存中
       const customMetadata = {
         oneTime: isOneTime ? 'true' : 'false',
         uploadTime: new Date().toISOString()
@@ -409,6 +449,96 @@ export default {
         customMetadata.expirationTime = new Date(Date.now() + expirationTime * 1000).toISOString();
         customMetadata.expirationSeconds = expirationTime.toString();
       }
+
+      if (canDedup) {
+        const dedupKey = getDedupKey(requestedHash);
+        const existingInfo = await env.R2_BUCKET.head(dedupKey);
+        const existingExpiration = getLiveExpiration(existingInfo, env);
+        const requestedExpiresAt = new Date(customMetadata.expirationTime).getTime();
+
+        if (existingExpiration.live && existingExpiration.expiresAt >= requestedExpiresAt) {
+          const responseText = await buildUploadResponseText(request, env, dedupKey, forceShortUrl, true, expirationTime, expirationLimited);
+          return new Response(responseText, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'X-One-Time-Upload': 'false',
+              'X-Dedup-Hit': 'true',
+            },
+          });
+        }
+
+        const clientIP = getClientIP(request);
+        const putOptions = {
+          httpMetadata: { contentType },
+          customMetadata: {
+            ...customMetadata,
+            sha256: requestedHash,
+          },
+        };
+
+        if (existingExpiration.live) {
+          const tempKey = getTempKey(requestedHash);
+          const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
+          const { stream: hashingBody, digest } = createHashingStream(limitedBody);
+
+          try {
+            const tempResult = await env.R2_BUCKET.put(tempKey, hashingBody, {
+              httpMetadata: { contentType },
+              customMetadata: {
+                uploadTime: new Date().toISOString(),
+                tempFor: dedupKey,
+              },
+            });
+            const actualHash = await digest;
+            if (actualHash !== requestedHash) {
+              await env.R2_BUCKET.delete(tempKey);
+              return hashMismatchResponse(actualHash, requestedHash);
+            }
+
+            const tempObject = await env.R2_BUCKET.get(tempKey);
+            if (!tempObject) {
+              throw new Error('Temporary upload object not found');
+            }
+
+            const uploadResult = await env.R2_BUCKET.put(dedupKey, tempObject.body, putOptions);
+            await env.R2_BUCKET.delete(tempKey);
+            const uploadedSize = getUploadedSize(uploadResult, tempResult?.size, parsedContentLength, getBytesRead());
+            console.log(`[Dedup Extend] key=${dedupKey} size=${formatBytes(uploadedSize)} ip=${clientIP} oneTime=false`);
+          } catch (error) {
+            await env.R2_BUCKET.delete(tempKey).catch(() => {});
+            throw error;
+          }
+        } else {
+          const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
+          const { stream: hashingBody, digest } = createHashingStream(limitedBody);
+          const uploadResult = await env.R2_BUCKET.put(dedupKey, hashingBody, putOptions);
+          const actualHash = await digest;
+
+          if (actualHash !== requestedHash) {
+            await env.R2_BUCKET.delete(dedupKey);
+            return hashMismatchResponse(actualHash, requestedHash);
+          }
+
+          const uploadedSize = getUploadedSize(uploadResult, null, parsedContentLength, getBytesRead());
+          console.log(`[Dedup Upload] key=${dedupKey} size=${formatBytes(uploadedSize)} ip=${clientIP} oneTime=false`);
+        }
+
+        const responseText = await buildUploadResponseText(request, env, dedupKey, forceShortUrl, true, expirationTime, expirationLimited);
+        return new Response(responseText, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'X-One-Time-Upload': 'false',
+            'X-Dedup-Hit': 'false',
+          },
+        });
+      }
+
+      // 生成随机文件名。一次性上传永远不去重。
+      const randomId = generateRandomId();
+      const fileName = `${randomId}${extension}`;
+      const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
 
       const uploadResult = await env.R2_BUCKET.put(fileName, limitedBody, {
         httpMetadata: {
@@ -429,59 +559,7 @@ export default {
 
       console.log(`[Upload] key=${fileName} size=${sizeLabel} ip=${clientIP} oneTime=${isOneTime}`);
 
-      // 返回上传成功的 URL
-      const url = new URL(request.url);
-      let fileUrl = `${url.protocol}//${url.hostname}/${fileName}`;
-
-      // 如果使用 /short 路径，尝试生成短链接
-      if (forceShortUrl) {
-        try {
-          // 将长链接转换为 base64
-          const base64Url = btoa(fileUrl);
-
-          // 调用短链接 API
-          const shortUrlResponse = await fetch(env.SHORT_URL_SERVICE || 'https://suosuo.de/short', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `longUrl=${encodeURIComponent(base64Url)}`,
-          });
-
-          if (shortUrlResponse.ok) {
-            const shortUrlData = await shortUrlResponse.json();
-            if (shortUrlData.Code === 1 && shortUrlData.ShortUrl) {
-              fileUrl = shortUrlData.ShortUrl;
-              console.log(`Generated short URL: ${fileUrl} for original: ${url.protocol}//${url.hostname}/${fileName}`);
-            } else if (forceShortUrl) {
-              console.warn(`Short URL API returned unexpected response: ${JSON.stringify(shortUrlData)}`);
-            }
-          }
-        } catch (error) {
-          console.error('Failed to generate short URL:', error);
-          // 如果是 /short 路径但短链接生成失败，提示用户
-          if (forceShortUrl) {
-            console.warn('Short URL was requested via /short but generation failed, falling back to original URL');
-          }
-          // 继续使用原始链接
-        }
-      }
-
-      // 根据是否有有效期返回不同的文本提示
-      let responseText;
-      if (hasExpiration) {
-        const expirationHours = Math.floor(expirationTime / 3600);
-        const expirationMinutes = Math.floor((expirationTime % 3600) / 60);
-        const expirationString = expirationHours > 0 
-          ? `${expirationHours}小时${expirationMinutes > 0 ? expirationMinutes + '分钟' : ''}`
-          : `${expirationMinutes}分钟`;
-        responseText = `\n\n${fileUrl}\n\n🕐 注意：此文件将在 ${expirationString} 后过期，期间可以多次下载。\n   Note: This file will expire after ${expirationString} and can be downloaded multiple times.\n`;
-        if (expirationLimited) {
-          responseText += `⚠️  请求的有效期超过服务器上限，已调整为 ${expirationString}。\n   Requested expiration exceeded the server limit and was reduced to ${expirationString}.\n`;
-        }
-      } else {
-        responseText = `\n\n${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
-      }
+      const responseText = await buildUploadResponseText(request, env, fileName, forceShortUrl, hasExpiration, expirationTime, expirationLimited);
 
       return new Response(responseText, {
         status: 200,
@@ -548,6 +626,156 @@ function getClientIP(request) {
     forwardedIP ||
     'unknown'
   );
+}
+
+function isAuthorized(request, password) {
+  const authHeader = request.headers.get('Authorization');
+  let providedPassword = '';
+
+  if (authHeader && authHeader.startsWith('Basic ')) {
+    try {
+      const base64Credentials = authHeader.split(' ')[1];
+      const credentials = atob(base64Credentials);
+      const [, basicPassword] = credentials.split(':');
+      providedPassword = basicPassword || '';
+    } catch (e) {
+      console.error('Error parsing Basic auth:', e);
+    }
+  } else {
+    providedPassword = authHeader || '';
+  }
+
+  return providedPassword === password;
+}
+
+function isValidSha256Hex(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+}
+
+function getDedupKey(hash) {
+  return `c/${hash}`;
+}
+
+function getTempKey(hash) {
+  return `t/${hash}-${crypto.randomUUID()}`;
+}
+
+function makeFileUrl(request, key) {
+  const url = new URL(request.url);
+  return `${url.protocol}//${url.hostname}/${key}`;
+}
+
+function jsonResponse(data, status) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    },
+  });
+}
+
+function getLiveExpiration(fileInfo, env) {
+  const expirationTime = fileInfo?.customMetadata?.expirationTime;
+  if (!fileInfo || !expirationTime) {
+    return { live: false, expiresAt: 0 };
+  }
+
+  let expiresAt = new Date(expirationTime).getTime();
+  if (!Number.isFinite(expiresAt)) {
+    return { live: false, expiresAt: 0 };
+  }
+
+  if (env.ALLOW_LIFETIME_OVER_MAX_AGE !== 'true') {
+    const maxMulti = parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10);
+    const uploadTime = fileInfo.customMetadata?.uploadTime
+      ? new Date(fileInfo.customMetadata.uploadTime).getTime()
+      : fileInfo.uploaded.getTime();
+    expiresAt = Math.min(expiresAt, uploadTime + maxMulti * 1000);
+  }
+
+  return {
+    live: Date.now() <= expiresAt,
+    expiresAt,
+  };
+}
+
+async function buildUploadResponseText(request, env, fileName, forceShortUrl, hasExpiration, expirationTime, expirationLimited) {
+  let fileUrl = makeFileUrl(request, fileName);
+
+  // 如果使用 /short 路径，尝试生成短链接
+  if (forceShortUrl) {
+    try {
+      // 将长链接转换为 base64
+      const base64Url = btoa(fileUrl);
+
+      // 调用短链接 API
+      const shortUrlResponse = await fetch(env.SHORT_URL_SERVICE || 'https://suosuo.de/short', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: `longUrl=${encodeURIComponent(base64Url)}`,
+      });
+
+      if (shortUrlResponse.ok) {
+        const shortUrlData = await shortUrlResponse.json();
+        if (shortUrlData.Code === 1 && shortUrlData.ShortUrl) {
+          fileUrl = shortUrlData.ShortUrl;
+          console.log(`Generated short URL: ${fileUrl} for original: ${makeFileUrl(request, fileName)}`);
+        } else if (forceShortUrl) {
+          console.warn(`Short URL API returned unexpected response: ${JSON.stringify(shortUrlData)}`);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to generate short URL:', error);
+      // 如果是 /short 路径但短链接生成失败，提示用户
+      if (forceShortUrl) {
+        console.warn('Short URL was requested via /short but generation failed, falling back to original URL');
+      }
+      // 继续使用原始链接
+    }
+  }
+
+  // 根据是否有有效期返回不同的文本提示
+  if (hasExpiration) {
+    const expirationHours = Math.floor(expirationTime / 3600);
+    const expirationMinutes = Math.floor((expirationTime % 3600) / 60);
+    const expirationString = expirationHours > 0
+      ? `${expirationHours}小时${expirationMinutes > 0 ? expirationMinutes + '分钟' : ''}`
+      : `${expirationMinutes}分钟`;
+    let responseText = `\n\n${fileUrl}\n\n🕐 注意：此文件将在 ${expirationString} 后过期，期间可以多次下载。\n   Note: This file will expire after ${expirationString} and can be downloaded multiple times.\n`;
+    if (expirationLimited) {
+      responseText += `⚠️  请求的有效期超过服务器上限，已调整为 ${expirationString}。\n   Requested expiration exceeded the server limit and was reduced to ${expirationString}.\n`;
+    }
+    return responseText;
+  }
+
+  return `\n\n${fileUrl}\n\n⚠️  注意：此文件只能下载一次，下载后将自动删除！\n   Note: This file can only be downloaded once!\n`;
+}
+
+function getUploadedSize(uploadResult, fallbackSize, parsedContentLength, bytesRead) {
+  if (uploadResult && typeof uploadResult.size === 'number') {
+    return uploadResult.size;
+  }
+  if (typeof fallbackSize === 'number') {
+    return fallbackSize;
+  }
+  if (typeof parsedContentLength === 'number') {
+    return parsedContentLength;
+  }
+  return bytesRead;
+}
+
+function hashMismatchResponse(actualHash, expectedHash) {
+  return new Response(`Upload failed: SHA-256 mismatch. Expected ${expectedHash}, got ${actualHash}.\n`, {
+    status: 409,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+    },
+  });
 }
 
 // 格式化字节数为可读字符串
@@ -633,5 +861,57 @@ function createSizeLimitedStream(stream, maxBytes) {
   return {
     stream: limitedStream,
     getBytesRead: () => bytesRead,
+  };
+}
+
+function createHashingStream(stream) {
+  const hasher = sha256.create();
+  let resolveDigest;
+  let rejectDigest;
+  const digest = new Promise((resolve, reject) => {
+    resolveDigest = resolve;
+    rejectDigest = reject;
+  });
+
+  if (!stream) {
+    resolveDigest(bytesToHex(hasher.digest()));
+    return { stream, digest };
+  }
+
+  const reader = stream.getReader();
+  let streamClosed = false;
+
+  const hashingStream = new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          streamClosed = true;
+          resolveDigest(bytesToHex(hasher.digest()));
+          controller.close();
+          return;
+        }
+
+        hasher.update(value);
+        controller.enqueue(value);
+      } catch (error) {
+        streamClosed = true;
+        rejectDigest(error);
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      if (!streamClosed) {
+        streamClosed = true;
+        await reader.cancel(reason);
+      }
+      rejectDigest(reason instanceof Error ? reason : new Error(String(reason || 'Hashing stream cancelled')));
+    },
+  });
+
+  return {
+    stream: hashingStream,
+    digest,
   };
 }

@@ -81,6 +81,12 @@ source ~/.bashrc
 
 `MAX_AGE_FOR_MULTIDOWNLOAD` 是允许多次下载的最大有效期时间，单位为秒（默认值是86400，即24小时）。用户可以设置不超过此限制的自定义有效期。此限制在服务端强制执行：超过限制的有效期（例如直接通过 `X-Expiration-Seconds` 头设置）会被自动调整为此值，除非 `ALLOW_LIFETIME_OVER_MAX_AGE` 设置为 `true`。
 
+`ENABLE_DEDUP` 控制带有效期上传的 SHA-256 内容哈希去重。默认值为 `true`；设置为 `false` 时会关闭预检和已有多次下载对象的复用。
+
+`X-Content-SHA256` 是用于带有效期上传的可选 64 位十六进制 SHA-256 头。提供后，服务可以复用相同内容哈希的已有对象，而不是重复存储。
+
+`/api/hash/<sha256>` 是浏览器上传器使用的公开预检端点。命中时返回 `exists=true`，同时包含 `url`、`expiresAt` 和 `remainingSeconds`。上传和下载的密码保护仍然只作用于文件操作本身。
+
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
 
 `PASSWORD` 环境变量为上传、下载必须提供的密码。如果不需要密码保护，可以将其留空。

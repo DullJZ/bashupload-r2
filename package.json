@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@noble/hashes": "^2.3.0",
     "mime": "^4.0.7"
   }
 }

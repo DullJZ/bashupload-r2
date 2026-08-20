@@ -80,6 +80,12 @@ Click the "Deploy to Cloudflare" button above to modify the configuration.
 
 `MAX_AGE_FOR_MULTIDOWNLOAD` is the maximum expiration time allowed for multiple downloads in seconds (default is 86400, which is 24 hours). Users can set custom expiration times up to this limit. This limit is enforced server-side: expiration times exceeding it (e.g. sent directly via `X-Expiration-Seconds`) are automatically reduced to this value unless `ALLOW_LIFETIME_OVER_MAX_AGE` is `true`.
 
+`ENABLE_DEDUP` controls SHA-256 content-hash deduplication for uploads with expiration times. It defaults to `true`; set it to `false` to disable precheck and reuse of existing multi-download objects.
+
+`X-Content-SHA256` is an optional 64-character hexadecimal SHA-256 header for uploads with expiration times. When provided, the service can reuse an existing object with the same content hash instead of storing a duplicate.
+
+`/api/hash/<sha256>` is a public precheck endpoint for the browser uploader. It returns `exists=true` when a live dedup object is available, along with `url`, `expiresAt`, and `remainingSeconds`. Upload and download password protection still apply to the file operations themselves.
+
 `SHORT_URL_SERVICE` is the short URL service API endpoint (default is `https://suosuo.de/short`), you can change it to your own short URL service if needed. Only support [MyUrls](https://github.com/CareyWang/MyUrls).
 
 `PASSWORD` environment variable is the password that must be provided for upload and download. If password protection is not needed, it can be left blank.
