@@ -1,4 +1,9 @@
 {
+  "name": "bashupload-js",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "dependencies": {
     "@noble/hashes": "^2.3.0",
     "mime": "^4.0.7"

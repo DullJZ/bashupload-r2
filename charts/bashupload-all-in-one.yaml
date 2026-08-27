@@ -62,7 +62,7 @@ spec:
     - "*.bashupload.app"
 
 ---
-# R2 凭证 Secret
+# R2 凭证和去重私钥 Secret
 apiVersion: v1
 kind: Secret
 metadata:
@@ -74,6 +74,8 @@ stringData:
   R2_ACCESS_KEY_ID: "<YOUR_R2_ACCESS_KEY_ID>"
   R2_SECRET_ACCESS_KEY: "<YOUR_R2_SECRET_ACCESS_KEY>"
   R2_BUCKET_NAME: "bashupload"
+  # 至少 32 字节的随机值，例如由 openssl rand -hex 32 生成
+  DEDUP_SECRET: "<YOUR_DEDUP_SECRET>"
 
 ---
 # 应用配置 ConfigMap
@@ -88,9 +90,10 @@ data:
   MAX_AGE: "3600"
   MAX_AGE_FOR_MULTIDOWNLOAD: "86400"
   ENABLE_SHORT_URL: "false"
+  ENABLE_DEDUP: "true"
   ALLOW_LIFETIME_OVER_MAX_AGE: "false"
   SHORT_URL_SERVICE: "https://suosuo.de/short"
-  NO_CLEANUP: "true"
+  NO_CLEANUP: "false"
 
 ---
 # Nginx 配置 ConfigMap

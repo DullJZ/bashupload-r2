@@ -39,6 +39,8 @@ R2_ACCOUNT_ID=your_account_id
 R2_ACCESS_KEY_ID=your_access_key_id
 R2_SECRET_ACCESS_KEY=your_secret_access_key
 R2_BUCKET_NAME=your_bucket_name
+ENABLE_DEDUP=true
+DEDUP_SECRET=<至少 32 字节的随机值>
 ```
 
 ### 3. 启动服务
@@ -109,6 +111,7 @@ curl http://localhost:3000/short -T test.txt
 - `MAX_AGE_FOR_MULTIDOWNLOAD`: 多次下载模式下的最大保存时间（秒），默认 86400（24小时）。服务端强制执行，超过限制的有效期会被自动调整为此值（除非启用 `ALLOW_LIFETIME_OVER_MAX_AGE`）
 - `ENABLE_SHORT_URL`: 是否启用短链接，默认 `false`
 - `ENABLE_DEDUP`: 是否启用多次下载（过期时间）上传的 SHA-256 内容哈希去重，默认 `true`；仅当值严格为 `false` 时禁用。一次性上传不会去重，仍使用随机文件名
+- `DEDUP_SECRET`: 安全去重必需的服务端私钥，建议使用至少 32 字节的随机值；通过运行时 env 或 `.env` 配置，不要提交 secret。缺失时实际回退为随机 key 上传、不去重
 - `ALLOW_LIFETIME_OVER_MAX_AGE`: 是否允许超过 MAX_AGE 的过期时间，默认 `false`
 - `PASSWORD`: 上传密码保护（可选）
 - `SHORT_URL_SERVICE`: 短链接服务地址，默认 `https://suosuo.de/short`
@@ -119,33 +122,9 @@ curl http://localhost:3000/short -T test.txt
 
 ### SHA-256 内容哈希去重
 
-去重仅适用于带有效过期时间的上传（`X-Expiration-Seconds > 0`）。一次性上传始终保持随机对象 key，绝不会复用已有对象。
+去重仅适用于带有效期的上传。浏览器和客户端会完整发送请求体，服务端接收完成后计算 SHA-256；设置 `ENABLE_DEDUP=true` 且配置 `DEDUP_SECRET` 时，通过 HMAC 派生内部 key。相同字节共享一份不可变的 `b/` blob，每次上传仍生成新的随机 `a/` alias，独立保存有效期、Content-Type 和 blob 引用。返回给用户的是 alias URL，而不是共享 blob URL，因此同一内容的不同上传可拥有不同有效期和响应类型。缺少 `DEDUP_SECRET` 时回退随机 key 上传，不使用 raw-hash URL，也不去重。
 
-客户端可在上传时提供 64 位十六进制 `X-Content-SHA256` 头：
-
-```bash
-SHA=$(sha256sum file.txt | cut -d ' ' -f1)
-curl -H "X-Expiration-Seconds: 3600" \
-     -H "X-Content-SHA256: ${SHA}" \
-     http://localhost:3000 -T file.txt
-```
-
-行为说明：
-
-- 未提供或提供无效 `X-Content-SHA256` 时，使用原有上传流程。
-- 去重内容存储在 `c/<sha256hex>`；临时校验对象使用 `t/` 前缀。
-- 如已有同 hash 文件仍有效且过期时间不早于本次请求，服务直接返回已有 URL，不读取请求体，并返回 `X-Dedup-Hit: true`。
-- 如已有同 hash 文件有效但本次请求需要更晚过期时间，服务会先把新请求体写入临时对象并校验 SHA-256，校验通过后再替换/延长 `c/<hash>` 元数据；校验失败返回 `409 Conflict` 且保留原对象。
-- 如不存在或已过期，服务流式写入 `c/<hash>`，写入后校验 hash；不匹配时删除对象并返回 `409 Conflict`。
-- 定时清理会删除过期内容对象，并清理 1 小时以上的 `t/` 临时对象。
-
-预检端点：
-
-```bash
-curl http://localhost:3000/api/hash/${SHA}
-```
-
-命中时返回 JSON：`exists=true`、`hit=true`、`url`、`expiresAt`、`remainingSeconds`。无效 hash 返回 `400`，缺失或已过期返回 `404`。该端点与 `/api/config` 一样公开，不要求密码；这会暴露“某个已知 hash 是否存在”的信息，请根据隐私需求决定是否启用 `ENABLE_DEDUP`。
+`X-Content-SHA256` 仅是可选的完整性校验声明，不是去重前提；服务端会自行计算并校验内容哈希。过期清理只删除 alias，不会立即删除可能仍被其他 alias 引用的 blob。共享 blob 当前不会自动回收，最后一个 alias 过期后可能继续累积；引用感知的垃圾回收将作为后续独立功能实现。Docker 请在运行时环境或 `.env` 中配置 `DEDUP_SECRET`，不要提交 secret。轮换 secret 会建立新的去重 namespace；已有 alias 保存完整 blob 引用，仍可使用到各自过期。早期格式的 `c/` 链接继续兼容下载和原有过期清理。
 
 ## 性能调优
 

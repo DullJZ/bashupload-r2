@@ -1,4 +1,7 @@
 node_modules/
 .wrangler/
+.dev.vars
 
 docker/go/.env
+docker/go/bashupload
+docker/go/*.exe

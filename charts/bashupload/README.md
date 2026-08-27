@@ -31,6 +31,10 @@ r2:
   secretAccessKey: "your-secret-key"
   bucketName: "bashupload"
 
+dedup:
+  # 使用至少 32 字节的随机值，并将 my-values.yaml 作为私密文件保存
+  secret: "your-random-dedup-secret"
+
 tls:
   clusterIssuer:
     email: "your-email@example.com"
@@ -52,6 +56,7 @@ helm install bashupload bashupload/bashupload \
   --set r2.accessKeyId="your-access-key" \
   --set r2.secretAccessKey="your-secret-key" \
   --set r2.bucketName="bashupload" \
+  --set-string dedup.secret="your-random-dedup-secret" \
   --set tls.clusterIssuer.email="your-email@example.com" \
   --set tls.clusterIssuer.cloudflare.apiToken="your-cloudflare-api-token"
 ```
@@ -72,8 +77,10 @@ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/
 | `r2.accessKeyId` | R2 Access Key ID | `""` |
 | `r2.secretAccessKey` | R2 Secret Access Key | `""` |
 | `r2.bucketName` | R2 存储桶名称 | `"bashupload"` |
+| `dedup.secret` | 内容去重 HMAC 私钥（启用去重时必需，存入 Kubernetes Secret） | `""` |
 | `config.maxUploadSize` | 最大上传大小（字节） | `"5368709120"` |
 | `config.maxAge` | 文件最大保存时间（秒） | `"3600"` |
+| `config.enableDedup` | 是否启用带有效期上传的内容去重 | `"true"` |
 | `config.uploadRateLimit` | 单 IP 每窗口最大上传次数（`"0"` 禁用） | `"10"` |
 | `config.uploadRateLimitWindow` | 上传限流窗口时长（秒） | `"60"` |
 | `config.trustProxyHeaders` | 是否信任代理头识别客户端 IP（nginx sidecar 场景保持 `"true"`） | `"true"` |

@@ -11,6 +11,7 @@ data:
   MAX_AGE: {{ .Values.config.maxAge | quote }}
   MAX_AGE_FOR_MULTIDOWNLOAD: {{ .Values.config.maxAgeForMultidownload | quote }}
   ENABLE_SHORT_URL: {{ .Values.config.enableShortUrl | quote }}
+  ENABLE_DEDUP: {{ .Values.config.enableDedup | quote }}
   ALLOW_LIFETIME_OVER_MAX_AGE: {{ .Values.config.allowLifetimeOverMaxAge | quote }}
   SHORT_URL_SERVICE: {{ .Values.config.shortUrlService | quote }}
   NO_CLEANUP: {{ .Values.config.noCleanup | quote }}

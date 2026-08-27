@@ -23,6 +23,11 @@ r2:
   secretAccessKey: ""
   bucketName: "bashupload"
 
+# Content deduplication secret. Set a random value of at least 32 bytes in a
+# private values file or with --set-string; never commit the real value.
+dedup:
+  secret: ""
+
 # Application configuration
 config:
   port: "3000"
@@ -30,9 +35,10 @@ config:
   maxAge: "3600"                   # 1 hour
   maxAgeForMultidownload: "86400"  # 24 hours
   enableShortUrl: "false"
+  enableDedup: "true"
   allowLifetimeOverMaxAge: "false"
   shortUrlService: "https://suosuo.de/short"
-  noCleanup: "true"                # Disable cleanup in K8s (handled externally)
+  noCleanup: "false"               # Keep built-in alias and legacy-object cleanup enabled
   uploadRateLimit: "10"            # Max uploads per IP per window, "0" to disable
   uploadRateLimitWindow: "60"      # Rate limit window in seconds
   trustProxyHeaders: "true"        # Trust X-Real-IP/X-Forwarded-For (nginx sidecar sets X-Real-IP)

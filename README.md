@@ -80,11 +80,15 @@ Click the "Deploy to Cloudflare" button above to modify the configuration.
 
 `MAX_AGE_FOR_MULTIDOWNLOAD` is the maximum expiration time allowed for multiple downloads in seconds (default is 86400, which is 24 hours). Users can set custom expiration times up to this limit. This limit is enforced server-side: expiration times exceeding it (e.g. sent directly via `X-Expiration-Seconds`) are automatically reduced to this value unless `ALLOW_LIFETIME_OVER_MAX_AGE` is `true`.
 
-`ENABLE_DEDUP` controls SHA-256 content-hash deduplication for uploads with expiration times. It defaults to `true`; set it to `false` to disable precheck and reuse of existing multi-download objects.
+`ENABLE_DEDUP` controls SHA-256 content-hash deduplication for uploads with expiration times. It defaults to `true`; the browser always uploads the complete file, and the server computes the hash and deduplicates storage after receiving it. Deduplication is active only when `DEDUP_SECRET` is also configured. One-time downloads continue to use random object keys.
 
-`X-Content-SHA256` is an optional 64-character hexadecimal SHA-256 header for uploads with expiration times. When provided, the service can reuse an existing object with the same content hash instead of storing a duplicate.
+`DEDUP_SECRET` is required to enable secure deduplication. Use a random value of at least 32 bytes. When set, the server computes SHA-256 after fully receiving an expiration upload and derives an internal blob key with `HMAC-SHA256(DEDUP_SECRET, content hash)`. Identical bytes share one immutable `b/` blob, while every upload receives a new random `a/` alias containing its own expiration time, content type, and blob reference. Download URLs expose only aliases, so expiring one upload does not invalidate another alias for the same content. Alias objects are deleted after expiration. Shared blobs are not automatically reclaimed yet and may accumulate after their last alias expires; reference-aware garbage collection is planned separately. If the secret is missing, uploads fall back to random keys without deduplication.
 
-`/api/hash/<sha256>` is a public precheck endpoint for the browser uploader. It returns `exists=true` when a live dedup object is available, along with `url`, `expiresAt`, and `remainingSeconds`. Upload and download password protection still apply to the file operations themselves.
+`X-Content-SHA256` is an optional integrity declaration. It is not required for deduplication; the server computes and verifies the content hash itself.
+
+For Workers, keep `DEDUP_SECRET` out of `wrangler.toml` and configure it with `npx wrangler secret put DEDUP_SECRET`. For local development, put it in `.dev.vars` and do not commit that file. Rotating the secret creates a new deduplication namespace; existing aliases remain usable because they retain their complete blob reference.
+
+Existing `c/` links created by the earlier deduplication format remain downloadable and follow their original expiration metadata until cleanup removes them.
 
 `SHORT_URL_SERVICE` is the short URL service API endpoint (default is `https://suosuo.de/short`), you can change it to your own short URL service if needed. Only support [MyUrls](https://github.com/CareyWang/MyUrls).
 

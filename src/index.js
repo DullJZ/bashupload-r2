@@ -1,4 +1,5 @@
 import mime from 'mime';
+import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 
@@ -36,6 +37,12 @@ export default {
 
         for (const object of listed.objects) {
           checkedCount++;
+
+          // Content-addressed blobs are shared by aliases. Reference-aware GC is
+          // not implemented yet, so avoid both age deletion and unnecessary HEADs.
+          if (object.key.startsWith('b/')) {
+            continue;
+          }
 
           // 创建异步删除任务
           const deleteTask = (async () => {
@@ -134,7 +141,8 @@ export default {
           maxAgeForMultiDownload: parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10),
           maxUploadSize: parseInt(env.MAX_UPLOAD_SIZE || '5368709120', 10),
           maxAge: parseInt(env.MAX_AGE || '3600', 10),
-          needPassword: Boolean(env.PASSWORD)
+          needPassword: Boolean(env.PASSWORD),
+          enableDedup: env.ENABLE_DEDUP !== 'false' && Boolean(env.DEDUP_SECRET)
         };
         
         return new Response(JSON.stringify(config), {
@@ -146,32 +154,6 @@ export default {
             'Access-Control-Allow-Headers': 'Content-Type'
           }
         });
-      }
-
-      if (pathname.startsWith('/api/hash/')) {
-        const hash = pathname.substring('/api/hash/'.length).toLowerCase();
-        if (!isValidSha256Hex(hash)) {
-          return jsonResponse({ error: 'Invalid SHA-256 hash' }, 400);
-        }
-
-        const key = getDedupKey(hash);
-        const fileInfo = await env.R2_BUCKET.head(key);
-        const liveExpiration = getLiveExpiration(fileInfo, env);
-
-        if (!liveExpiration.live) {
-          if (fileInfo) {
-            ctx.waitUntil(env.R2_BUCKET.delete(key));
-          }
-          return jsonResponse({ exists: false }, 404);
-        }
-
-        return jsonResponse({
-          exists: true,
-          url: makeFileUrl(request, key),
-          key,
-          expiresAt: new Date(liveExpiration.expiresAt).toISOString(),
-          remainingSeconds: Math.max(0, Math.floor((liveExpiration.expiresAt - Date.now()) / 1000)),
-        }, 200);
       }
 
       // 根路径处理
@@ -253,6 +235,15 @@ export default {
         }
         
         try {
+          if (fileName.startsWith('a/')) {
+            return await handleAliasDownload(fileName, env);
+          }
+
+          // Blob and temporary object names are internal implementation details.
+          if (fileName.startsWith('b/') || fileName.startsWith('t/')) {
+            return new Response('File not found\n', { status: 404 });
+          }
+
           const object = await env.R2_BUCKET.get(fileName);
           if (!object) {
             return new Response('File not found\n', { status: 404 });
@@ -423,8 +414,21 @@ export default {
       const isOneTime = !hasExpiration;
 
       const enableDedup = env.ENABLE_DEDUP !== 'false';
-      const requestedHash = (request.headers.get('X-Content-SHA256') || '').toLowerCase();
-      const canDedup = enableDedup && hasExpiration && isValidSha256Hex(requestedHash);
+      const dedupSecret = typeof env.DEDUP_SECRET === 'string' ? env.DEDUP_SECRET : '';
+      const canDedup = enableDedup && dedupSecret.length > 0 && hasExpiration;
+      const declaredHashHeader = (request.headers.get('X-Content-SHA256') || '').trim();
+      const declaredHash = declaredHashHeader.toLowerCase();
+
+      if (declaredHashHeader && !isValidSha256Hex(declaredHashHeader)) {
+        return new Response('Upload failed: invalid X-Content-SHA256 header.\n', {
+          status: 400,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
+      }
+
+      if (enableDedup && hasExpiration && !dedupSecret) {
+        console.warn('[Dedup] DEDUP_SECRET is missing; using random-key upload for this request');
+      }
 
       let contentType = request.headers.get('content-type') || 'application/octet-stream';
       let extension = '';
@@ -451,101 +455,96 @@ export default {
       }
 
       if (canDedup) {
-        const dedupKey = getDedupKey(requestedHash);
-        const existingInfo = await env.R2_BUCKET.head(dedupKey);
-        const existingExpiration = getLiveExpiration(existingInfo, env);
-        const requestedExpiresAt = new Date(customMetadata.expirationTime).getTime();
-
-        if (existingExpiration.live && existingExpiration.expiresAt >= requestedExpiresAt) {
-          const responseText = await buildUploadResponseText(request, env, dedupKey, forceShortUrl, true, expirationTime, expirationLimited);
-          return new Response(responseText, {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/plain; charset=utf-8',
-              'X-One-Time-Upload': 'false',
-              'X-Dedup-Hit': 'true',
-            },
-          });
-        }
-
         const clientIP = getClientIP(request);
-        const putOptions = {
-          httpMetadata: { contentType },
-          customMetadata: {
-            ...customMetadata,
-            sha256: requestedHash,
-          },
-        };
+        const tempKey = getTempKey();
+        const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
+        const { stream: hashingBody, digest } = createHashingStream(limitedBody);
+        digest.catch(() => {});
+        let tempResult;
+        try {
+          tempResult = await env.R2_BUCKET.put(tempKey, hashingBody, {
+            httpMetadata: { contentType },
+            customMetadata: { uploadTime: new Date().toISOString() },
+          });
+          const actualHash = await digest;
+          if (declaredHash && actualHash !== declaredHash) {
+            await env.R2_BUCKET.delete(tempKey);
+            return hashMismatchResponse();
+          }
 
-        if (existingExpiration.live) {
-          const tempKey = getTempKey(requestedHash);
-          const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
-          const { stream: hashingBody, digest } = createHashingStream(limitedBody);
+          const blobKey = getDedupKey(actualHash, dedupSecret);
+          const existingInfo = await env.R2_BUCKET.head(blobKey);
+          const dedupHit = Boolean(existingInfo);
 
-          try {
-            const tempResult = await env.R2_BUCKET.put(tempKey, hashingBody, {
-              httpMetadata: { contentType },
+          if (!existingInfo) {
+            const tempObject = await env.R2_BUCKET.get(tempKey);
+            if (!tempObject) throw new Error('Temporary upload object not found');
+            await env.R2_BUCKET.put(blobKey, tempObject.body, {
+              httpMetadata: { contentType: 'application/octet-stream' },
               customMetadata: {
                 uploadTime: new Date().toISOString(),
-                tempFor: dedupKey,
+                contentSha256: actualHash,
               },
             });
-            const actualHash = await digest;
-            if (actualHash !== requestedHash) {
-              await env.R2_BUCKET.delete(tempKey);
-              return hashMismatchResponse(actualHash, requestedHash);
-            }
-
-            const tempObject = await env.R2_BUCKET.get(tempKey);
-            if (!tempObject) {
-              throw new Error('Temporary upload object not found');
-            }
-
-            const uploadResult = await env.R2_BUCKET.put(dedupKey, tempObject.body, putOptions);
-            await env.R2_BUCKET.delete(tempKey);
-            const uploadedSize = getUploadedSize(uploadResult, tempResult?.size, parsedContentLength, getBytesRead());
-            console.log(`[Dedup Extend] key=${dedupKey} size=${formatBytes(uploadedSize)} ip=${clientIP} oneTime=false`);
-          } catch (error) {
-            await env.R2_BUCKET.delete(tempKey).catch(() => {});
-            throw error;
           }
-        } else {
-          const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
-          const { stream: hashingBody, digest } = createHashingStream(limitedBody);
-          const uploadResult = await env.R2_BUCKET.put(dedupKey, hashingBody, putOptions);
-          const actualHash = await digest;
+          await env.R2_BUCKET.delete(tempKey);
 
-          if (actualHash !== requestedHash) {
-            await env.R2_BUCKET.delete(dedupKey);
-            return hashMismatchResponse(actualHash, requestedHash);
-          }
+          const uploadedSize = getUploadedSize(tempResult, null, parsedContentLength, getBytesRead());
+          const aliasKey = getAliasKey();
+          const aliasRecord = {
+            version: 1,
+            blobKey,
+            createdAt: customMetadata.uploadTime,
+            expiresAt: customMetadata.expirationTime,
+            contentType,
+            size: uploadedSize,
+          };
+          await env.R2_BUCKET.put(aliasKey, JSON.stringify(aliasRecord), {
+            httpMetadata: { contentType: 'application/json; charset=utf-8' },
+            customMetadata: {
+              uploadTime: aliasRecord.createdAt,
+              expirationTime: aliasRecord.expiresAt,
+              blobKey,
+            },
+          });
 
-          const uploadedSize = getUploadedSize(uploadResult, null, parsedContentLength, getBytesRead());
-          console.log(`[Dedup Upload] key=${dedupKey} size=${formatBytes(uploadedSize)} ip=${clientIP} oneTime=false`);
-        }
-
-        const responseText = await buildUploadResponseText(request, env, dedupKey, forceShortUrl, true, expirationTime, expirationLimited);
-        return new Response(responseText, {
-          status: 200,
-          headers: {
+          console.log(`[Dedup ${dedupHit ? 'Hit' : 'Upload'}] blob=${blobKey} alias=${aliasKey} size=${formatBytes(uploadedSize)} ip=${clientIP} oneTime=false`);
+          const responseText = await buildUploadResponseText(request, env, aliasKey, forceShortUrl, true, expirationTime, expirationLimited);
+          const headers = {
             'Content-Type': 'text/plain; charset=utf-8',
             'X-One-Time-Upload': 'false',
-            'X-Dedup-Hit': 'false',
-          },
-        });
+            'X-Dedup-Hit': dedupHit ? 'true' : 'false',
+          };
+          return new Response(responseText, { status: 200, headers });
+        } catch (error) {
+          await env.R2_BUCKET.delete(tempKey).catch(() => {});
+          throw error;
+        }
       }
 
       // 生成随机文件名。一次性上传永远不去重。
       const randomId = generateRandomId();
       const fileName = `${randomId}${extension}`;
       const { stream: limitedBody, getBytesRead } = createSizeLimitedStream(request.body, maxUploadSize);
+      let uploadBody = limitedBody;
+      let declaredHashDigest = null;
+      if (declaredHash) {
+        const hashing = createHashingStream(limitedBody);
+        uploadBody = hashing.stream;
+        declaredHashDigest = hashing.digest;
+        declaredHashDigest.catch(() => {});
+      }
 
-      const uploadResult = await env.R2_BUCKET.put(fileName, limitedBody, {
+      const uploadResult = await env.R2_BUCKET.put(fileName, uploadBody, {
         httpMetadata: {
           contentType: contentType,
         },
         customMetadata: customMetadata,
       });
+      if (declaredHashDigest && await declaredHashDigest !== declaredHash) {
+        await env.R2_BUCKET.delete(fileName);
+        return hashMismatchResponse();
+      }
 
       const uploadedSize =
         uploadResult && typeof uploadResult.size === 'number'
@@ -628,78 +627,97 @@ function getClientIP(request) {
   );
 }
 
-function isAuthorized(request, password) {
-  const authHeader = request.headers.get('Authorization');
-  let providedPassword = '';
-
-  if (authHeader && authHeader.startsWith('Basic ')) {
-    try {
-      const base64Credentials = authHeader.split(' ')[1];
-      const credentials = atob(base64Credentials);
-      const [, basicPassword] = credentials.split(':');
-      providedPassword = basicPassword || '';
-    } catch (e) {
-      console.error('Error parsing Basic auth:', e);
-    }
-  } else {
-    providedPassword = authHeader || '';
-  }
-
-  return providedPassword === password;
-}
-
 function isValidSha256Hex(value) {
   return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
 }
 
-function getDedupKey(hash) {
-  return `c/${hash}`;
+function getDedupKey(hash, secret) {
+  if (!secret) {
+    throw new Error('DEDUP_SECRET is required for deduplication');
+  }
+  const normalizedHash = hash.toLowerCase();
+  const encoder = new TextEncoder();
+  return `b/${bytesToHex(hmac(sha256, encoder.encode(secret), encoder.encode(normalizedHash)))}`;
 }
 
-function getTempKey(hash) {
-  return `t/${hash}-${crypto.randomUUID()}`;
+function getTempKey() {
+  return `t/${crypto.randomUUID()}`;
+}
+
+function getAliasKey() {
+  return `a/${crypto.randomUUID()}`;
+}
+
+async function handleAliasDownload(aliasKey, env) {
+  const aliasObject = await env.R2_BUCKET.get(aliasKey);
+  if (!aliasObject) {
+    return new Response('File not found\n', { status: 404 });
+  }
+
+  let alias;
+  try {
+    alias = JSON.parse(await aliasObject.text());
+  } catch (error) {
+    console.error(`[Alias Download] Invalid alias JSON: ${aliasKey}`, error);
+    return new Response('File not found\n', { status: 404 });
+  }
+
+  if (!isValidAliasRecord(alias)) {
+    console.error(`[Alias Download] Invalid alias record: ${aliasKey}`);
+    return new Response('File not found\n', { status: 404 });
+  }
+
+  const expiresAt = new Date(alias.expiresAt).getTime();
+  if (Date.now() > expiresAt) {
+    await env.R2_BUCKET.delete(aliasKey);
+    console.log(`[Alias Download] Deleted expired alias: ${aliasKey}`);
+    return new Response('File not found (expired)\n', { status: 404 });
+  }
+
+  const blob = await env.R2_BUCKET.get(alias.blobKey);
+  if (!blob) {
+    console.error(`[Alias Download] Missing blob ${alias.blobKey} for alias ${aliasKey}`);
+    return new Response('File not found\n', { status: 404 });
+  }
+
+  const headers = new Headers({
+    'Content-Type': alias.contentType,
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Expiration-Download': 'true',
+    'X-Expiration-Time': alias.expiresAt,
+  });
+  if (blob.httpEtag) {
+    headers.set('etag', blob.httpEtag);
+  }
+  if (Number.isSafeInteger(alias.size) && alias.size >= 0) {
+    headers.set('Content-Length', String(alias.size));
+  }
+
+  return new Response(blob.body, { headers });
+}
+
+function isValidAliasRecord(alias) {
+  if (!alias || alias.version !== 1) {
+    return false;
+  }
+
+  if (typeof alias.blobKey !== 'string' || !/^b\/[a-f0-9]{64}$/.test(alias.blobKey)) {
+    return false;
+  }
+
+  if (typeof alias.expiresAt !== 'string' || !Number.isFinite(new Date(alias.expiresAt).getTime())) {
+    return false;
+  }
+
+  return typeof alias.contentType === 'string' && alias.contentType.length > 0;
 }
 
 function makeFileUrl(request, key) {
   const url = new URL(request.url);
-  return `${url.protocol}//${url.hostname}/${key}`;
-}
-
-function jsonResponse(data, status) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    },
-  });
-}
-
-function getLiveExpiration(fileInfo, env) {
-  const expirationTime = fileInfo?.customMetadata?.expirationTime;
-  if (!fileInfo || !expirationTime) {
-    return { live: false, expiresAt: 0 };
-  }
-
-  let expiresAt = new Date(expirationTime).getTime();
-  if (!Number.isFinite(expiresAt)) {
-    return { live: false, expiresAt: 0 };
-  }
-
-  if (env.ALLOW_LIFETIME_OVER_MAX_AGE !== 'true') {
-    const maxMulti = parseInt(env.MAX_AGE_FOR_MULTIDOWNLOAD || '86400', 10);
-    const uploadTime = fileInfo.customMetadata?.uploadTime
-      ? new Date(fileInfo.customMetadata.uploadTime).getTime()
-      : fileInfo.uploaded.getTime();
-    expiresAt = Math.min(expiresAt, uploadTime + maxMulti * 1000);
-  }
-
-  return {
-    live: Date.now() <= expiresAt,
-    expiresAt,
-  };
+  return `${url.protocol}//${url.host}/${key}`;
 }
 
 async function buildUploadResponseText(request, env, fileName, forceShortUrl, hasExpiration, expirationTime, expirationLimited) {
@@ -769,8 +787,8 @@ function getUploadedSize(uploadResult, fallbackSize, parsedContentLength, bytesR
   return bytesRead;
 }
 
-function hashMismatchResponse(actualHash, expectedHash) {
-  return new Response(`Upload failed: SHA-256 mismatch. Expected ${expectedHash}, got ${actualHash}.\n`, {
+function hashMismatchResponse() {
+  return new Response('Upload failed: SHA-256 mismatch.\n', {
     status: 409,
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',

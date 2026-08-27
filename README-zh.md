@@ -81,11 +81,15 @@ source ~/.bashrc
 
 `MAX_AGE_FOR_MULTIDOWNLOAD` 是允许多次下载的最大有效期时间，单位为秒（默认值是86400，即24小时）。用户可以设置不超过此限制的自定义有效期。此限制在服务端强制执行：超过限制的有效期（例如直接通过 `X-Expiration-Seconds` 头设置）会被自动调整为此值，除非 `ALLOW_LIFETIME_OVER_MAX_AGE` 设置为 `true`。
 
-`ENABLE_DEDUP` 控制带有效期上传的 SHA-256 内容哈希去重。默认值为 `true`；设置为 `false` 时会关闭预检和已有多次下载对象的复用。
+`ENABLE_DEDUP` 控制带有效期上传的 SHA-256 内容哈希去重，默认值为 `true`。浏览器始终完整上传文件，服务端接收完成后计算哈希并进行存储去重。只有同时配置 `DEDUP_SECRET` 时去重才会生效；一次性下载仍使用随机对象 key。
 
-`X-Content-SHA256` 是用于带有效期上传的可选 64 位十六进制 SHA-256 头。提供后，服务可以复用相同内容哈希的已有对象，而不是重复存储。
+`DEDUP_SECRET` 是启用安全去重的必需服务端私钥，建议使用至少 32 字节的随机值。服务端完整接收带有效期的上传后计算 SHA-256，通过 `HMAC-SHA256(DEDUP_SECRET, 内容哈希)` 派生内部 blob key。相同字节共享一份不可变的 `b/` blob；每次上传都会生成新的随机 `a/` alias，独立保存有效期、Content-Type 和 blob 引用。下载 URL 只暴露 alias，因此一个上传过期不会使相同内容的其他 alias 提前失效。过期后只删除 alias。共享 blob 当前不会自动回收，最后一个 alias 过期后可能继续累积；引用感知的垃圾回收将作为后续独立功能实现。缺少 secret 时回退为随机 key 上传，不启用去重。
 
-`/api/hash/<sha256>` 是浏览器上传器使用的公开预检端点。命中时返回 `exists=true`，同时包含 `url`、`expiresAt` 和 `remainingSeconds`。上传和下载的密码保护仍然只作用于文件操作本身。
+`X-Content-SHA256` 仅是可选的完整性校验声明，不是去重前提；服务端会自行计算并校验内容哈希。
+
+Worker 请勿将 `DEDUP_SECRET` 写入 `wrangler.toml`，使用 `npx wrangler secret put DEDUP_SECRET` 配置；本地开发写入 `.dev.vars`，不要提交该文件。轮换 secret 会建立新的去重 namespace；已有 alias 保存了完整 blob 引用，因此仍可使用到各自过期。
+
+早期去重格式创建的 `c/` 链接继续兼容下载，并按原有过期元数据清理。
 
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
 

@@ -1,5 +1,4 @@
 const UPLOAD_URL = window.location.origin;
-const HASH_DEDUP_MAX_BYTES = 256 * 1024 * 1024; // Keep browser hashing conservative: 256MB
 let uploadedFiles = [];
 let currentLang = 'en';
 let serverConfig = null;
@@ -37,90 +36,6 @@ function formatDuration(seconds) {
     }
 
     return currentLang === 'zh' ? `${value}${unitZh}` : `${value} ${unit}`;
-}
-
-async function calculateFileSha256(file) {
-    if (!window.crypto || !crypto.subtle || !file || file.size > HASH_DEDUP_MAX_BYTES) {
-        return null;
-    }
-
-    const buffer = await file.arrayBuffer();
-    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
-async function precheckHash(hash) {
-    if (!hash) return null;
-
-    try {
-        const response = await fetch(`${UPLOAD_URL}/api/hash/${encodeURIComponent(hash)}`, {
-            method: 'GET',
-            cache: 'no-store'
-        });
-
-        if (!response.ok) {
-            return null;
-        }
-
-        return await response.json();
-    } catch (error) {
-        console.warn('Hash precheck failed, uploading normally:', error);
-        return null;
-    }
-}
-
-function getRemainingSeconds(precheckResult) {
-    if (!precheckResult) return null;
-
-    const candidates = [
-        precheckResult.remainingSeconds,
-        precheckResult.remaining,
-        precheckResult.ttl,
-        precheckResult.expiresIn
-    ];
-
-    for (const candidate of candidates) {
-        const seconds = parseInt(candidate, 10);
-        if (Number.isFinite(seconds) && seconds >= 0) {
-            return seconds;
-        }
-    }
-
-    if (precheckResult.expirationTime || precheckResult.expiresAt) {
-        const expiresAt = new Date(precheckResult.expirationTime || precheckResult.expiresAt).getTime();
-        if (Number.isFinite(expiresAt)) {
-            return Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
-        }
-    }
-
-    return null;
-}
-
-function buildDedupSuccessMessage(name, remainingSeconds) {
-    const remainingText = formatDuration(remainingSeconds);
-    if (currentLang === 'zh') {
-        return remainingText
-            ? `找到相同内容，已复用现有链接：${name}（剩余 ${remainingText}）`
-            : `找到相同内容，已复用现有链接：${name}`;
-    }
-
-    return remainingText
-        ? `Identical content found. Reused existing link for ${name} (${remainingText} remaining).`
-        : `Identical content found. Reused existing link for ${name}.`;
-}
-
-function handleDedupHit(name, url, precheckResult) {
-    hideProgress();
-    const remainingSeconds = getRemainingSeconds(precheckResult);
-    const usePassword = document.getElementById('usePassword')?.checked;
-    showStatus(buildDedupSuccessMessage(name, remainingSeconds), 'success');
-    addFileToList(name, url, usePassword, { dedup: true, remainingSeconds });
-    uploadedFiles.push({ name, url, passwordProtected: usePassword, dedup: true });
-}
-
-function isHashPrecheckHit(precheckResult) {
-    return Boolean(precheckResult && precheckResult.url && (precheckResult.exists === true || precheckResult.hit === true));
 }
 
 // Fetch server configuration
@@ -433,36 +348,12 @@ async function uploadText(text, maxRetries = 3) {
     showStatus(uploadingMsg, 'uploading');
     showProgress();
 
-    const useExpiration = document.getElementById('useExpiration')?.checked;
-    let contentHash = null;
-
-    if (useExpiration) {
-        const textBlob = new Blob([text], { type: 'text/plain' });
-        if (textBlob.size <= HASH_DEDUP_MAX_BYTES) {
-            showStatus(currentLang === 'zh' ? '正在检查是否已有相同文本...' : 'Checking for identical text...', 'uploading');
-            try {
-                contentHash = await calculateFileSha256(textBlob);
-                const precheck = await precheckHash(contentHash);
-                if (isHashPrecheckHit(precheck)) {
-                    handleDedupHit('text.txt', precheck.url, precheck);
-                    document.getElementById('textInput').value = '';
-                    return;
-                }
-            } catch (error) {
-                console.warn('Text hash calculation failed, uploading normally:', error);
-                contentHash = null;
-            }
-        }
-
-        showStatus(uploadingMsg, 'uploading');
-    }
-
     let lastError;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const response = await uploadTextWithProgress(text, (progress) => {
                 updateProgress(progress);
-            }, contentHash);
+            });
 
             if (response.status === 200) {
                 const responseUrl = response.responseText.trim();
@@ -566,7 +457,7 @@ async function uploadText(text, maxRetries = 3) {
 }
 
 // Upload text with progress tracking
-function uploadTextWithProgress(text, onProgress, contentHash = null) {
+function uploadTextWithProgress(text, onProgress) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
 
@@ -622,10 +513,6 @@ function uploadTextWithProgress(text, onProgress, contentHash = null) {
             }
 
             xhr.setRequestHeader('X-Expiration-Seconds', expirationSeconds);
-        }
-
-        if (useExpiration && contentHash) {
-            xhr.setRequestHeader('X-Content-SHA256', contentHash);
         }
 
         // Send text as form data
@@ -894,12 +781,7 @@ function addFileToList(fileName, url, usePassword = false, options = {}) {
     warningText.style.color = '#ff6b35';
     warningText.style.fontSize = '12px';
     warningText.style.marginBottom = '5px';
-    if (options.dedup) {
-        const remainingText = formatDuration(options.remainingSeconds);
-        warningText.innerHTML = currentLang === 'zh'
-            ? `♻️ 已复用相同内容的现有链接${remainingText ? `，剩余 ${remainingText}` : ''}`
-            : `♻️ Reused an existing link for identical content${remainingText ? `, ${remainingText} remaining` : ''}`;
-    } else if (useExpiration) {
+    if (useExpiration) {
         const setExpirationBtn = document.getElementById('setExpirationBtn');
         const expirationSeconds = setExpirationBtn.getAttribute('data-expiration-seconds');
         
@@ -983,33 +865,12 @@ async function uploadSimpleFile(file, maxRetries = 3) {
     showStatus(uploadingMsg, 'uploading');
     showProgress();
 
-    const useExpiration = document.getElementById('useExpiration')?.checked;
-    let contentHash = null;
-
-    if (useExpiration && file.size <= HASH_DEDUP_MAX_BYTES) {
-        showStatus(currentLang === 'zh' ? `正在计算 ${file.name} 的校验值...` : `Calculating checksum for ${file.name}...`, 'uploading');
-        try {
-            contentHash = await calculateFileSha256(file);
-            showStatus(currentLang === 'zh' ? '正在检查是否已有相同文件...' : 'Checking for identical file...', 'uploading');
-            const precheck = await precheckHash(contentHash);
-            if (isHashPrecheckHit(precheck)) {
-                handleDedupHit(file.name, precheck.url, precheck);
-                return;
-            }
-        } catch (error) {
-            console.warn('File hash calculation failed, uploading normally:', error);
-            contentHash = null;
-        }
-
-        showStatus(uploadingMsg, 'uploading');
-    }
-    
     let lastError;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const response = await uploadWithProgress(file, (progress) => {
                 updateProgress(progress);
-            }, contentHash);
+            });
             
             if (response.status === 200) {
                 const responseUrl = response.responseText.trim();
@@ -1111,7 +972,7 @@ async function uploadSimpleFile(file, maxRetries = 3) {
     showStatus(failedMsg, 'error');
 }
 
-function uploadWithProgress(file, onProgress, contentHash = null) {
+function uploadWithProgress(file, onProgress) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         
@@ -1169,10 +1030,6 @@ function uploadWithProgress(file, onProgress, contentHash = null) {
             xhr.setRequestHeader('X-Expiration-Seconds', expirationSeconds);
         }
 
-        if (useExpiration && contentHash) {
-            xhr.setRequestHeader('X-Content-SHA256', contentHash);
-        }
-        
         xhr.send(file);
     });
 }
