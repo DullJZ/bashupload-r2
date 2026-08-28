@@ -68,6 +68,13 @@ type offlineGCStats struct {
 	unreferencedBytes     int64
 }
 
+const defaultOfflineGCExpiryGrace = 15 * time.Minute
+
+type offlineGCOptions struct {
+	deleteMode  bool
+	expiryGrace time.Duration
+}
+
 // maintenanceObjectStore is the small subset of the S3 client required by
 // the offline maintenance command. Keeping the core scanner on this
 // interface makes it possible to exercise it with a deterministic fake store.
@@ -203,15 +210,15 @@ func main() {
 }
 
 func runGCCommand(args []string) int {
-	deleteMode, err := parseOfflineGCArgs(args)
+	options, err := parseOfflineGCArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		fmt.Fprintln(os.Stderr, "usage: bashupload gc --offline [--dry-run | --delete]")
+		fmt.Fprintln(os.Stderr, "usage: bashupload gc --offline [--dry-run | --delete] [--expiry-grace DURATION]")
 		return 2
 	}
 
-	stats, err := runOfflineGC(deleteMode)
-	printOfflineGCReport(stats, deleteMode)
+	stats, err := runOfflineGC(options)
+	printOfflineGCReport(stats, options)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[Offline GC] aborted (no further deletions): %v\n", err)
 		return 1
@@ -219,51 +226,81 @@ func runGCCommand(args []string) int {
 	return 0
 }
 
-func parseOfflineGCArgs(args []string) (bool, error) {
+func parseOfflineGCArgs(args []string) (offlineGCOptions, error) {
+	options := offlineGCOptions{expiryGrace: defaultOfflineGCExpiryGrace}
 	if len(args) == 0 || args[0] != "--offline" {
-		return false, errors.New("--offline confirmation is required")
+		return offlineGCOptions{}, errors.New("--offline confirmation is required")
 	}
 
-	deleteMode := false
 	dryRunMode := false
-	for _, arg := range args[1:] {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "--delete":
 			if dryRunMode {
-				return false, errors.New("--delete and --dry-run are mutually exclusive")
+				return offlineGCOptions{}, errors.New("--delete and --dry-run are mutually exclusive")
 			}
-			deleteMode = true
+			options.deleteMode = true
 		case "--dry-run":
-			if deleteMode {
-				return false, errors.New("--delete and --dry-run are mutually exclusive")
+			if options.deleteMode {
+				return offlineGCOptions{}, errors.New("--delete and --dry-run are mutually exclusive")
 			}
 			dryRunMode = true
+		case "--expiry-grace":
+			if i+1 >= len(args) {
+				return offlineGCOptions{}, errors.New("--expiry-grace requires a duration")
+			}
+			i++
+			grace, err := parseOfflineGCExpiryGrace(args[i])
+			if err != nil {
+				return offlineGCOptions{}, err
+			}
+			options.expiryGrace = grace
 		default:
-			return false, fmt.Errorf("unknown gc option %q", arg)
+			if strings.HasPrefix(arg, "--expiry-grace=") {
+				grace, err := parseOfflineGCExpiryGrace(strings.TrimPrefix(arg, "--expiry-grace="))
+				if err != nil {
+					return offlineGCOptions{}, err
+				}
+				options.expiryGrace = grace
+				continue
+			}
+			return offlineGCOptions{}, fmt.Errorf("unknown gc option %q", arg)
 		}
 	}
-	return deleteMode, nil
+	return options, nil
 }
 
-func printOfflineGCReport(stats offlineGCStats, deleteMode bool) {
+func parseOfflineGCExpiryGrace(value string) (time.Duration, error) {
+	grace, err := time.ParseDuration(value)
+	if err != nil || grace < 0 {
+		return 0, fmt.Errorf("invalid --expiry-grace %q: must be a non-negative duration", value)
+	}
+	return grace, nil
+}
+
+func printOfflineGCReport(stats offlineGCStats, options offlineGCOptions) {
 	mode := "dry-run"
-	if deleteMode {
+	if options.deleteMode {
 		mode = "delete"
 	}
 	plannedDeleteRequests := (stats.unreferencedBlobs + 999) / 1000
-	fmt.Printf("[Offline GC] mode=%s aliases=%d liveAliases=%d expiredAliases=%d blobs=%d unreferencedBlobs=%d orphanBytes=%d\n", mode, stats.aliasesScanned, stats.liveAliases, stats.expiredAliases, stats.blobsScanned, stats.unreferencedBlobs, stats.unreferencedBytes)
+	fmt.Printf("[Offline GC] mode=%s expiryGrace=%s aliases=%d liveAliases=%d expiredAliases=%d blobs=%d unreferencedBlobs=%d orphanBytes=%d\n", mode, options.expiryGrace, stats.aliasesScanned, stats.liveAliases, stats.expiredAliases, stats.blobsScanned, stats.unreferencedBlobs, stats.unreferencedBytes)
 	fmt.Printf("[Offline GC] LIST requests=%d GET requests=%d DeleteObjects requests=%d plannedDeleteObjectsRequests=%d\n", stats.listRequests, stats.getRequests, stats.deleteObjectsRequests, plannedDeleteRequests)
 }
 
 // runOfflineGC builds a complete reference snapshot while the service is in a
-// write-frozen maintenance window. It performs no mutation unless deleteMode
+// write-frozen maintenance window. It performs no mutation unless delete mode
 // is true, and all validation completes before the first DeleteObjects call.
-func runOfflineGC(deleteMode bool) (offlineGCStats, error) {
-	return runOfflineGCWithStore(s3Client, bucketName, time.Now().UTC(), deleteMode)
+func runOfflineGC(options offlineGCOptions) (offlineGCStats, error) {
+	return runOfflineGCWithStore(s3Client, bucketName, time.Now().UTC(), options)
 }
 
-func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time.Time, deleteMode bool) (offlineGCStats, error) {
+func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time.Time, options offlineGCOptions) (offlineGCStats, error) {
 	var stats offlineGCStats
+	if options.expiryGrace < 0 {
+		return stats, errors.New("expiry grace must not be negative")
+	}
 
 	aliasObjects, err := listOfflineObjects(store, bucket, "a/", &stats)
 	if err != nil {
@@ -285,7 +322,7 @@ func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time
 		if parseErr != nil {
 			return stats, fmt.Errorf("alias %s has invalid expiresAt: %w", object.key, parseErr)
 		}
-		if now.Before(expiresAt) {
+		if now.Before(expiresAt.Add(options.expiryGrace)) {
 			stats.liveAliases++
 			if _, exists := liveReferences[record.BlobKey]; !exists {
 				liveReferences[record.BlobKey] = object.key
@@ -328,7 +365,7 @@ func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time
 		stats.unreferencedBytes += blobs[key].size
 	}
 
-	if !deleteMode {
+	if !options.deleteMode {
 		return stats, nil
 	}
 
@@ -341,8 +378,8 @@ func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time
 func listOfflineObjects(store maintenanceObjectStore, bucket, prefix string, stats *offlineGCStats) ([]offlineObject, error) {
 	objects := make([]offlineObject, 0)
 	seenKeys := make(map[string]struct{})
+	seenContinuationTokens := make(map[string]struct{})
 	var continuationToken *string
-	var previousToken string
 	for {
 		input := &s3.ListObjectsV2Input{
 			Bucket:  aws.String(bucket),
@@ -383,11 +420,12 @@ func listOfflineObjects(store maintenanceObjectStore, bucket, prefix string, sta
 		if page.NextContinuationToken == nil || *page.NextContinuationToken == "" {
 			return nil, errors.New("truncated listing did not provide a continuation token")
 		}
-		if previousToken == *page.NextContinuationToken {
+		nextToken := *page.NextContinuationToken
+		if _, seen := seenContinuationTokens[nextToken]; seen {
 			return nil, errors.New("listing continuation token did not advance")
 		}
-		previousToken = *page.NextContinuationToken
-		continuationToken = page.NextContinuationToken
+		seenContinuationTokens[nextToken] = struct{}{}
+		continuationToken = aws.String(nextToken)
 	}
 }
 
@@ -439,7 +477,7 @@ func validateAliasRecord(record aliasRecord) error {
 	if _, err := time.Parse(time.RFC3339, record.ExpiresAt); err != nil {
 		return errors.New("invalid alias expiration")
 	}
-	if _, _, err := mime.ParseMediaType(record.ContentType); err != nil {
+	if record.ContentType == "" {
 		return errors.New("invalid alias content type")
 	}
 	return nil

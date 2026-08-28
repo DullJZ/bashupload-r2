@@ -92,7 +92,7 @@ Existing `c/` links created by the earlier deduplication format remain downloada
 
 ### Shared-blob garbage collection (maintenance window)
 
-The Go command performs a complete `a/` to `b/` reference scan while every writer is stopped. Run `./bashupload gc --offline --dry-run` first, review the report, then explicitly run `./bashupload gc --offline --delete` only after resolving all scan errors. The full stop, dry-run, delete, restart, and request-cost runbook is documented in [the Go deployment guide](docker/go/README.md#shared-blob-garbage-collection-maintenance-window).
+The Go command performs a complete `a/` to `b/` reference scan while every writer is stopped. Run `./bashupload gc --offline --dry-run` first, review the report, then explicitly run `./bashupload gc --offline --delete` only after resolving all scan errors. GC protects blobs for 15 minutes after alias expiration by default to tolerate minor clock skew; the maintenance host's clock should still be synchronized. The full stop, grace configuration, dry-run, delete, restart, and request-cost runbook is documented in [the Go deployment guide](docker/go/README.md#shared-blob-garbage-collection-maintenance-window).
 
 The freeze must include every Go/Worker instance, old binary, upload script, and scheduled job that can mutate R2; downloads can remain read-only. The maintenance command only scans `a/` and `b/`, deletes unreferenced `b/` objects in batches, and does not delete expired aliases. Routine cleanup continues to handle aliases, temporary objects, and legacy `c/` objects. Existing `c/` links remain compatible. If any writer cannot be stopped, do not use `--delete`.
 

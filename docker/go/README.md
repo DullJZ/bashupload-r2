@@ -136,13 +136,15 @@ Go 版本的 blob GC 在维护窗口中运行完整引用扫描。停止所有 G
 ./bashupload gc --offline --dry-run
 ```
 
-确认报告中的 alias/blob 数量、有效引用、孤儿 blob、损坏 alias 和预计释放空间，并解决所有 LIST、GET、解析或凭据错误。dry-run 不删除或改写 R2 对象。人工确认后才使用显式删除开关：
+确认报告中的 alias/blob 数量、有效引用、孤儿 blob、损坏 alias 和预计释放空间，并解决所有 LIST、GET、解析或凭据错误。运行前还应确认维护节点的系统时间已同步。dry-run 不删除或改写 R2 对象。人工确认后才使用显式删除开关：
 
 ```bash
 ./bashupload gc --offline --delete
 ```
 
 `--delete` 只删除没有有效 `a/` alias 引用的 `b/` 对象，并记录删除失败。删除后再次执行 `./bashupload gc --offline --dry-run` 做校验；省略 `--delete` 始终是只读模式。
+
+为容忍维护节点与 alias 写入节点之间的小幅时钟偏差，GC 默认在 alias 到期后继续保护其 blob 15 分钟。可用 `--expiry-grace 30m`（或 `--expiry-grace=30m`）设置更保守的窗口；该值必须为非负 Go duration。dry-run 和删除必须使用相同的 grace。将其设为 `0` 会取消时钟偏差保护，仅应在所有相关节点时钟已经确认同步时使用。
 
 Docker 维护顺序示例：
 

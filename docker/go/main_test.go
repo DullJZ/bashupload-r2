@@ -44,8 +44,11 @@ type offlineTestS3 struct {
 }
 
 type scriptedMaintenanceStore struct {
-	pages     []*s3.ListObjectsV2Output
-	listCalls int
+	pages        []*s3.ListObjectsV2Output
+	listCalls    int
+	deleteOutput *s3.DeleteObjectsOutput
+	deleteErr    error
+	deleteCalls  int
 }
 
 func (s *scriptedMaintenanceStore) ListObjectsV2(*s3.ListObjectsV2Input) (*s3.ListObjectsV2Output, error) {
@@ -61,8 +64,9 @@ func (*scriptedMaintenanceStore) GetObject(*s3.GetObjectInput) (*s3.GetObjectOut
 	return nil, fmt.Errorf("unexpected GET request")
 }
 
-func (*scriptedMaintenanceStore) DeleteObjects(*s3.DeleteObjectsInput) (*s3.DeleteObjectsOutput, error) {
-	return nil, fmt.Errorf("unexpected DeleteObjects request")
+func (s *scriptedMaintenanceStore) DeleteObjects(*s3.DeleteObjectsInput) (*s3.DeleteObjectsOutput, error) {
+	s.deleteCalls++
+	return s.deleteOutput, s.deleteErr
 }
 
 func newOfflineTestS3() (*offlineTestS3, *httptest.Server, *s3.S3) {
@@ -81,7 +85,10 @@ func newOfflineTestS3() (*offlineTestS3, *httptest.Server, *s3.S3) {
 }
 
 func runOfflineTestGC(store *offlineTestS3, client *s3.S3, deleteMode bool) (offlineGCStats, error) {
-	return runOfflineGCWithStore(client, store.bucket, time.Now().UTC(), deleteMode)
+	return runOfflineGCWithStore(client, store.bucket, time.Now().UTC(), offlineGCOptions{
+		deleteMode:  deleteMode,
+		expiryGrace: defaultOfflineGCExpiryGrace,
+	})
 }
 
 func (s *offlineTestS3) put(key string, body []byte) {
@@ -391,6 +398,59 @@ func TestOfflineGCLiveAndExpiredAliases(t *testing.T) {
 	}
 }
 
+func TestOfflineGCExpiryGraceIsConsistentAcrossModes(t *testing.T) {
+	now := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	grace := 15 * time.Minute
+
+	for _, deleteMode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete=%t", deleteMode), func(t *testing.T) {
+			store, server, client := newOfflineTestS3()
+			defer server.Close()
+
+			withinGraceBlob := validOfflineBlobKey('a')
+			expiredBlob := validOfflineBlobKey('b')
+			store.put(withinGraceBlob, []byte("within-grace"))
+			store.put(expiredBlob, []byte("expired"))
+			addOfflineAlias(store, "a/within-grace", withinGraceBlob, now.Add(-grace).Add(time.Second))
+			addOfflineAlias(store, "a/expired-at-boundary", expiredBlob, now.Add(-grace))
+
+			stats, err := runOfflineGCWithStore(client, store.bucket, now, offlineGCOptions{
+				deleteMode:  deleteMode,
+				expiryGrace: grace,
+			})
+			if err != nil {
+				t.Fatalf("runOfflineGCWithStore: %v", err)
+			}
+			if stats.liveAliases != 1 || stats.expiredAliases != 1 || stats.unreferencedBlobs != 1 {
+				t.Fatalf("unexpected grace stats: %+v", stats)
+			}
+			if !store.has(withinGraceBlob) {
+				t.Fatal("blob whose alias is within expiry grace was deleted")
+			}
+			if got := store.has(expiredBlob); got == deleteMode {
+				t.Fatalf("expired blob presence = %t, deleteMode = %t", got, deleteMode)
+			}
+		})
+	}
+}
+
+func TestOfflineGCRejectsNegativeExpiryGraceBeforeScanning(t *testing.T) {
+	store, server, client := newOfflineTestS3()
+	defer server.Close()
+
+	store.put(validOfflineBlobKey('a'), []byte("blob"))
+	stats, err := runOfflineGCWithStore(client, store.bucket, time.Now().UTC(), offlineGCOptions{
+		deleteMode:  true,
+		expiryGrace: -time.Second,
+	})
+	if err == nil {
+		t.Fatal("runOfflineGCWithStore accepted a negative expiry grace")
+	}
+	if stats.listRequests != 0 || store.deletedKeyCount() != 0 {
+		t.Fatalf("invalid grace performed work: stats=%+v deletes=%d", stats, store.deletedKeyCount())
+	}
+}
+
 func TestOfflineGCScanFailuresFailClosed(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -400,6 +460,12 @@ func TestOfflineGCScanFailuresFailClosed(t *testing.T) {
 			name: "list failure",
 			setup: func(store *offlineTestS3) {
 				store.failListPrefix = "a/"
+			},
+		},
+		{
+			name: "blob list failure",
+			setup: func(store *offlineTestS3) {
+				store.failListPrefix = "b/"
 			},
 		},
 		{
@@ -448,6 +514,66 @@ func TestOfflineGCLiveReferenceMissingBlobFailsClosed(t *testing.T) {
 	}
 }
 
+func TestOfflineGCAcceptsWorkerAliasContentType(t *testing.T) {
+	store, server, client := newOfflineTestS3()
+	defer server.Close()
+
+	blobKey := validOfflineBlobKey('a')
+	store.put(blobKey, []byte("live"))
+	now := time.Now().UTC()
+	workerAlias := map[string]any{
+		"version":     1,
+		"blobKey":     blobKey,
+		"createdAt":   now.Add(-time.Hour).Format(time.RFC3339Nano),
+		"expiresAt":   now.Add(time.Hour).Format(time.RFC3339Nano),
+		"contentType": "application/x-worker; profile",
+		"size":        4,
+	}
+	body, err := json.Marshal(workerAlias)
+	if err != nil {
+		t.Fatalf("marshal Worker alias: %v", err)
+	}
+	store.put("a/worker", body)
+
+	stats, err := runOfflineTestGC(store, client, true)
+	if err != nil {
+		t.Fatalf("runOfflineGC with Worker alias: %v", err)
+	}
+	if stats.liveAliases != 1 || stats.unreferencedBlobs != 0 {
+		t.Fatalf("unexpected Worker alias stats: %+v", stats)
+	}
+	if !store.has(blobKey) {
+		t.Fatal("blob protected by Worker alias was deleted")
+	}
+}
+
+func TestOfflineGCRejectsEmptyAliasContentType(t *testing.T) {
+	store, server, client := newOfflineTestS3()
+	defer server.Close()
+
+	blobKey := validOfflineBlobKey('a')
+	store.put(blobKey, []byte("live"))
+	record := aliasRecord{
+		Version:   1,
+		BlobKey:   blobKey,
+		CreatedAt: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		Size:      4,
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal alias: %v", err)
+	}
+	store.put("a/empty-content-type", body)
+
+	if _, err := runOfflineTestGC(store, client, true); err == nil {
+		t.Fatal("runOfflineGC accepted an empty alias content type")
+	}
+	if store.deletedKeyCount() != 0 {
+		t.Fatalf("invalid alias scan issued deletes: %d", store.deletedKeyCount())
+	}
+}
+
 func TestOfflineGCPaginatesAliasListing(t *testing.T) {
 	store, server, client := newOfflineTestS3()
 	defer server.Close()
@@ -491,6 +617,14 @@ func TestOfflineGCRejectsMalformedPagination(t *testing.T) {
 			},
 		},
 		{
+			name: "non-adjacent token loop",
+			pages: []*s3.ListObjectsV2Output{
+				{IsTruncated: &trueValue, NextContinuationToken: aws.String("A")},
+				{IsTruncated: &trueValue, NextContinuationToken: aws.String("B")},
+				{IsTruncated: &trueValue, NextContinuationToken: aws.String("A")},
+			},
+		},
+		{
 			name: "key outside prefix",
 			pages: []*s3.ListObjectsV2Output{{
 				IsTruncated: &falseValue,
@@ -506,8 +640,47 @@ func TestOfflineGCRejectsMalformedPagination(t *testing.T) {
 			if _, err := listOfflineObjects(store, offlineTestBucket, "a/", &stats); err == nil {
 				t.Fatal("malformed pagination unexpectedly succeeded")
 			}
+			if store.listCalls != len(tc.pages) {
+				t.Fatalf("LIST calls = %d, want %d", store.listCalls, len(tc.pages))
+			}
 			if stats.deleteObjectsRequests != 0 {
 				t.Fatal("malformed pagination issued a delete")
+			}
+		})
+	}
+}
+
+func TestOfflineGCDeleteObjectsFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		output *s3.DeleteObjectsOutput
+		err    error
+	}{
+		{name: "request failure", err: fmt.Errorf("injected DeleteObjects failure")},
+		{name: "nil response"},
+		{
+			name: "partial error",
+			output: &s3.DeleteObjectsOutput{Errors: []*s3.Error{{
+				Key:     aws.String("b/failed"),
+				Code:    aws.String("AccessDenied"),
+				Message: aws.String("denied"),
+			}}},
+		},
+		{
+			name:   "nil partial error",
+			output: &s3.DeleteObjectsOutput{Errors: []*s3.Error{nil}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &scriptedMaintenanceStore{deleteOutput: tc.output, deleteErr: tc.err}
+			var stats offlineGCStats
+			if err := deleteOfflineObjects(store, offlineTestBucket, []string{"b/failed"}, &stats); err == nil {
+				t.Fatal("DeleteObjects failure unexpectedly succeeded")
+			}
+			if store.deleteCalls != 1 || stats.deleteObjectsRequests != 1 {
+				t.Fatalf("DeleteObjects calls = %d, stats = %d; want 1", store.deleteCalls, stats.deleteObjectsRequests)
 			}
 		})
 	}
@@ -557,23 +730,34 @@ func TestParseOfflineGCArgsDefaultsToDryRun(t *testing.T) {
 	tests := []struct {
 		args       []string
 		wantDelete bool
+		wantGrace  time.Duration
 		wantError  bool
 	}{
-		{args: []string{"--offline"}},
-		{args: []string{"--offline", "--dry-run"}},
-		{args: []string{"--offline", "--delete"}, wantDelete: true},
+		{args: []string{"--offline"}, wantGrace: defaultOfflineGCExpiryGrace},
+		{args: []string{"--offline", "--dry-run"}, wantGrace: defaultOfflineGCExpiryGrace},
+		{args: []string{"--offline", "--delete"}, wantDelete: true, wantGrace: defaultOfflineGCExpiryGrace},
+		{args: []string{"--offline", "--expiry-grace", "30m"}, wantGrace: 30 * time.Minute},
+		{args: []string{"--offline", "--delete", "--expiry-grace=1h"}, wantDelete: true, wantGrace: time.Hour},
+		{args: []string{"--offline", "--expiry-grace=0"}},
 		{args: []string{"--delete"}, wantError: true},
 		{args: []string{"--offline", "--dry-run", "--delete"}, wantError: true},
 		{args: []string{"--offline", "--delete", "--dry-run"}, wantError: true},
+		{args: []string{"--offline", "--expiry-grace"}, wantError: true},
+		{args: []string{"--offline", "--expiry-grace="}, wantError: true},
+		{args: []string{"--offline", "--expiry-grace", "soon"}, wantError: true},
+		{args: []string{"--offline", "--expiry-grace=-1s"}, wantError: true},
 	}
 
 	for _, tc := range tests {
-		gotDelete, err := parseOfflineGCArgs(tc.args)
+		got, err := parseOfflineGCArgs(tc.args)
 		if (err != nil) != tc.wantError {
 			t.Errorf("parseOfflineGCArgs(%v) error = %v, wantError=%t", tc.args, err, tc.wantError)
 		}
-		if gotDelete != tc.wantDelete {
-			t.Errorf("parseOfflineGCArgs(%v) delete = %t, want %t", tc.args, gotDelete, tc.wantDelete)
+		if got.deleteMode != tc.wantDelete {
+			t.Errorf("parseOfflineGCArgs(%v) delete = %t, want %t", tc.args, got.deleteMode, tc.wantDelete)
+		}
+		if !tc.wantError && got.expiryGrace != tc.wantGrace {
+			t.Errorf("parseOfflineGCArgs(%v) grace = %s, want %s", tc.args, got.expiryGrace, tc.wantGrace)
 		}
 	}
 }
