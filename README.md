@@ -82,13 +82,19 @@ Click the "Deploy to Cloudflare" button above to modify the configuration.
 
 `ENABLE_DEDUP` controls SHA-256 content-hash deduplication for uploads with expiration times. It defaults to `true`; the browser always uploads the complete file, and the server computes the hash and deduplicates storage after receiving it. Deduplication is active only when `DEDUP_SECRET` is also configured. One-time downloads continue to use random object keys.
 
-`DEDUP_SECRET` is required to enable secure deduplication. Use a random value of at least 32 bytes. When set, the server computes SHA-256 after fully receiving an expiration upload and derives an internal blob key with `HMAC-SHA256(DEDUP_SECRET, content hash)`. Identical bytes share one immutable `b/` blob, while every upload receives a new random `a/` alias containing its own expiration time, content type, and blob reference. Download URLs expose only aliases, so expiring one upload does not invalidate another alias for the same content. Alias objects are deleted after expiration. Shared blobs are not automatically reclaimed yet and may accumulate after their last alias expires; reference-aware garbage collection is planned separately. If the secret is missing, uploads fall back to random keys without deduplication.
+`DEDUP_SECRET` is required to enable secure deduplication. Use a random value of at least 32 bytes. When set, the server computes SHA-256 after fully receiving an expiration upload and derives an internal blob key with `HMAC-SHA256(DEDUP_SECRET, content hash)`. Identical bytes share one immutable `b/` blob, while every upload receives a new random `a/` alias containing its own expiration time, content type, and blob reference. Download URLs expose only aliases, so expiring one upload does not invalidate another alias for the same content. Alias objects are deleted after expiration. Shared blobs are reclaimed by the write-freezing maintenance procedure below; routine cleanup deliberately skips `b/` because it cannot prove that a shared blob has no aliases while uploads are active. If the secret is missing, uploads fall back to random keys without deduplication.
 
 `X-Content-SHA256` is an optional integrity declaration. It is not required for deduplication; the server computes and verifies the content hash itself.
 
 For Workers, keep `DEDUP_SECRET` out of `wrangler.toml` and configure it with `npx wrangler secret put DEDUP_SECRET`. For local development, put it in `.dev.vars` and do not commit that file. Rotating the secret creates a new deduplication namespace; existing aliases remain usable because they retain their complete blob reference.
 
 Existing `c/` links created by the earlier deduplication format remain downloadable and follow their original expiration metadata until cleanup removes them.
+
+### Shared-blob garbage collection (maintenance window)
+
+The Go command performs a complete `a/` to `b/` reference scan while every writer is stopped. Run `./bashupload gc --offline --dry-run` first, review the report, then explicitly run `./bashupload gc --offline --delete` only after resolving all scan errors. The full stop, dry-run, delete, restart, and request-cost runbook is documented in [the Go deployment guide](docker/go/README.md#shared-blob-garbage-collection-maintenance-window).
+
+The freeze must include every Go/Worker instance, old binary, upload script, and scheduled job that can mutate R2; downloads can remain read-only. The maintenance command only scans `a/` and `b/`, deletes unreferenced `b/` objects in batches, and does not delete expired aliases. Routine cleanup continues to handle aliases, temporary objects, and legacy `c/` objects. Existing `c/` links remain compatible. If any writer cannot be stopped, do not use `--delete`.
 
 `SHORT_URL_SERVICE` is the short URL service API endpoint (default is `https://suosuo.de/short`), you can change it to your own short URL service if needed. Only support [MyUrls](https://github.com/CareyWang/MyUrls).
 

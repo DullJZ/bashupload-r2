@@ -124,7 +124,57 @@ curl http://localhost:3000/short -T test.txt
 
 去重仅适用于带有效期的上传。浏览器和客户端会完整发送请求体，服务端接收完成后计算 SHA-256；设置 `ENABLE_DEDUP=true` 且配置 `DEDUP_SECRET` 时，通过 HMAC 派生内部 key。相同字节共享一份不可变的 `b/` blob，每次上传仍生成新的随机 `a/` alias，独立保存有效期、Content-Type 和 blob 引用。返回给用户的是 alias URL，而不是共享 blob URL，因此同一内容的不同上传可拥有不同有效期和响应类型。缺少 `DEDUP_SECRET` 时回退随机 key 上传，不使用 raw-hash URL，也不去重。
 
-`X-Content-SHA256` 仅是可选的完整性校验声明，不是去重前提；服务端会自行计算并校验内容哈希。过期清理只删除 alias，不会立即删除可能仍被其他 alias 引用的 blob。共享 blob 当前不会自动回收，最后一个 alias 过期后可能继续累积；引用感知的垃圾回收将作为后续独立功能实现。Docker 请在运行时环境或 `.env` 中配置 `DEDUP_SECRET`，不要提交 secret。轮换 secret 会建立新的去重 namespace；已有 alias 保存完整 blob 引用，仍可使用到各自过期。早期格式的 `c/` 链接继续兼容下载和原有过期清理。
+`X-Content-SHA256` 仅是可选的完整性校验声明，不是去重前提；服务端会自行计算并校验内容哈希。过期清理只删除 alias，不会立即删除可能仍被其他 alias 引用的 blob。共享 blob 通过下文的写入冻结维护流程回收；日常清理器会跳过 `b/`，因为上传进行时无法证明共享 blob 已经没有 alias 引用。Docker 请在运行时环境或 `.env` 中配置 `DEDUP_SECRET`，不要提交 secret。轮换 secret 会建立新的去重 namespace；已有 alias 保存完整 blob 引用，仍可使用到各自过期。早期格式的 `c/` 链接继续兼容下载和原有过期清理。
+
+### 共享 blob 垃圾回收（维护窗口）
+
+Go 版本的 blob GC 在维护窗口中运行完整引用扫描。停止所有 Go 实例、旧版本二进制、Worker/上传脚本，以及会写入或删除 R2 对象的定时任务；等待正在进行的上传完成后再扫描。只有经过确认的只读入口可以继续提供下载，维护期间不能创建新的上传或 alias。多副本部署必须同时停止或排空所有副本，单独停止一个 Pod 不构成维护窗口。
+
+维护工具默认只读，先执行 dry-run：
+
+```bash
+./bashupload gc --offline --dry-run
+```
+
+确认报告中的 alias/blob 数量、有效引用、孤儿 blob、损坏 alias 和预计释放空间，并解决所有 LIST、GET、解析或凭据错误。dry-run 不删除或改写 R2 对象。人工确认后才使用显式删除开关：
+
+```bash
+./bashupload gc --offline --delete
+```
+
+`--delete` 只删除没有有效 `a/` alias 引用的 `b/` 对象，并记录删除失败。删除后再次执行 `./bashupload gc --offline --dry-run` 做校验；省略 `--delete` 始终是只读模式。
+
+Docker 维护顺序示例：
+
+```bash
+# 1. 先禁止入口流量中的新写入，并等待上传请求结束
+docker compose stop bashupload-go
+
+# 2. 使用同一组 R2 环境变量运行只读扫描
+docker compose run --rm bashupload-go gc --offline --dry-run
+
+# 3. 人工确认后才允许删除
+docker compose run --rm bashupload-go gc --offline --delete
+docker compose run --rm bashupload-go gc --offline --dry-run
+
+# 4. 恢复应用并运行健康检查、上传、alias 下载冒烟测试
+docker compose up -d bashupload-go
+```
+
+Kubernetes 部署还必须暂停 Worker/cron，并停止或排空所有应用 Pod，阻止它们在扫描期间重新创建。完成后重启全部 Go 副本，恢复入口和定时任务，再验证过期清理。已有 `c/` 链接继续按旧规则兼容和清理；维护扫描只处理 `b/` 共享 blob。
+
+#### 请求成本估算
+
+设 `N_a` 为 alias 数量，`N_b` 为共享 blob 数量，`N_o` 为孤儿 blob 数量，`P_x = max(1, ceil(N_x / 1000))`（空前缀也需要一次 LIST）。当前 Go alias 将 blob 引用存放在 JSON body 中，因此一次完整维护扫描约为：
+
+| 操作 | A 类 | B 类 |
+| --- | ---: | ---: |
+| LIST `a/` | `P_a` | 0 |
+| GET 每个 alias JSON | 0 | `N_a` |
+| LIST `b/` | `P_b` | 0 |
+| `DeleteObjects`（每批最多 1000 个 key） | 另计删除操作数 | 0 |
+
+也就是 `A approx P_a + P_b`、`B approx N_a`，另有 `ceil(N_o / 1000)` 次独立的 `DeleteObjects` 操作；工具不扫描 `t/`，也不删除过期 alias，后者仍由应用重启后的日常清理器处理。以 100 万 alias、10 万 blob、20 万孤儿 blob 为例，一次维护约需 1000 次 alias LIST、100 次 blob LIST、约 100 万次 alias GET，以及 200 次 `DeleteObjects`。停机维护的成本优势来自按需运行，避免在线 GC 的反复扫描、租约和二次确认。
 
 ## 性能调优
 

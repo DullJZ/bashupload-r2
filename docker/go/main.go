@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,32 @@ type aliasRecord struct {
 	ExpiresAt   string `json:"expiresAt"`
 	ContentType string `json:"contentType"`
 	Size        int64  `json:"size"`
+}
+
+type offlineObject struct {
+	key  string
+	size int64
+}
+
+type offlineGCStats struct {
+	listRequests          int
+	getRequests           int
+	deleteObjectsRequests int
+	aliasesScanned        int
+	liveAliases           int
+	expiredAliases        int
+	blobsScanned          int
+	unreferencedBlobs     int
+	unreferencedBytes     int64
+}
+
+// maintenanceObjectStore is the small subset of the S3 client required by
+// the offline maintenance command. Keeping the core scanner on this
+// interface makes it possible to exercise it with a deterministic fake store.
+type maintenanceObjectStore interface {
+	ListObjectsV2(*s3.ListObjectsV2Input) (*s3.ListObjectsV2Output, error)
+	GetObject(*s3.GetObjectInput) (*s3.GetObjectOutput, error)
+	DeleteObjects(*s3.DeleteObjectsInput) (*s3.DeleteObjectsOutput, error)
 }
 
 var (
@@ -140,6 +167,10 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "gc" {
+		os.Exit(runGCCommand(os.Args[2:]))
+	}
+
 	// 启动定时清理任务
 	if disableCleanup {
 		log.Printf("Scheduled cleanup disabled via NO_CLEANUP")
@@ -169,6 +200,284 @@ func main() {
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func runGCCommand(args []string) int {
+	deleteMode, err := parseOfflineGCArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		fmt.Fprintln(os.Stderr, "usage: bashupload gc --offline [--dry-run | --delete]")
+		return 2
+	}
+
+	stats, err := runOfflineGC(deleteMode)
+	printOfflineGCReport(stats, deleteMode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[Offline GC] aborted (no further deletions): %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func parseOfflineGCArgs(args []string) (bool, error) {
+	if len(args) == 0 || args[0] != "--offline" {
+		return false, errors.New("--offline confirmation is required")
+	}
+
+	deleteMode := false
+	dryRunMode := false
+	for _, arg := range args[1:] {
+		switch arg {
+		case "--delete":
+			if dryRunMode {
+				return false, errors.New("--delete and --dry-run are mutually exclusive")
+			}
+			deleteMode = true
+		case "--dry-run":
+			if deleteMode {
+				return false, errors.New("--delete and --dry-run are mutually exclusive")
+			}
+			dryRunMode = true
+		default:
+			return false, fmt.Errorf("unknown gc option %q", arg)
+		}
+	}
+	return deleteMode, nil
+}
+
+func printOfflineGCReport(stats offlineGCStats, deleteMode bool) {
+	mode := "dry-run"
+	if deleteMode {
+		mode = "delete"
+	}
+	plannedDeleteRequests := (stats.unreferencedBlobs + 999) / 1000
+	fmt.Printf("[Offline GC] mode=%s aliases=%d liveAliases=%d expiredAliases=%d blobs=%d unreferencedBlobs=%d orphanBytes=%d\n", mode, stats.aliasesScanned, stats.liveAliases, stats.expiredAliases, stats.blobsScanned, stats.unreferencedBlobs, stats.unreferencedBytes)
+	fmt.Printf("[Offline GC] LIST requests=%d GET requests=%d DeleteObjects requests=%d plannedDeleteObjectsRequests=%d\n", stats.listRequests, stats.getRequests, stats.deleteObjectsRequests, plannedDeleteRequests)
+}
+
+// runOfflineGC builds a complete reference snapshot while the service is in a
+// write-frozen maintenance window. It performs no mutation unless deleteMode
+// is true, and all validation completes before the first DeleteObjects call.
+func runOfflineGC(deleteMode bool) (offlineGCStats, error) {
+	return runOfflineGCWithStore(s3Client, bucketName, time.Now().UTC(), deleteMode)
+}
+
+func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time.Time, deleteMode bool) (offlineGCStats, error) {
+	var stats offlineGCStats
+
+	aliasObjects, err := listOfflineObjects(store, bucket, "a/", &stats)
+	if err != nil {
+		return stats, fmt.Errorf("scan aliases: %w", err)
+	}
+	blobObjects, err := listOfflineObjects(store, bucket, "b/", &stats)
+	if err != nil {
+		return stats, fmt.Errorf("scan blobs: %w", err)
+	}
+
+	liveReferences := make(map[string]string)
+	for _, object := range aliasObjects {
+		stats.aliasesScanned++
+		record, readErr := readOfflineAliasRecord(store, bucket, object.key, &stats)
+		if readErr != nil {
+			return stats, fmt.Errorf("validate alias %s: %w", object.key, readErr)
+		}
+		expiresAt, parseErr := time.Parse(time.RFC3339, record.ExpiresAt)
+		if parseErr != nil {
+			return stats, fmt.Errorf("alias %s has invalid expiresAt: %w", object.key, parseErr)
+		}
+		if now.Before(expiresAt) {
+			stats.liveAliases++
+			if _, exists := liveReferences[record.BlobKey]; !exists {
+				liveReferences[record.BlobKey] = object.key
+			}
+		} else {
+			stats.expiredAliases++
+		}
+	}
+
+	blobs := make(map[string]offlineObject, len(blobObjects))
+	for _, object := range blobObjects {
+		if !isValidBlobKey(object.key) {
+			return stats, fmt.Errorf("blob %s has an invalid key", object.key)
+		}
+		if _, duplicate := blobs[object.key]; duplicate {
+			return stats, fmt.Errorf("duplicate blob key %s in listing", object.key)
+		}
+		blobs[object.key] = object
+		stats.blobsScanned++
+	}
+
+	// Only live aliases protect content. Expired aliases are handled by the
+	// normal scheduled cleanup; an already-missing target of an expired alias
+	// must not block reclaiming unrelated orphan blobs.
+	for blobKey, aliasKey := range liveReferences {
+		if _, exists := blobs[blobKey]; !exists {
+			return stats, fmt.Errorf("live alias %s references missing blob %s", aliasKey, blobKey)
+		}
+	}
+
+	unreferencedBlobs := make([]string, 0)
+	for blobKey := range blobs {
+		if _, referenced := liveReferences[blobKey]; !referenced {
+			unreferencedBlobs = append(unreferencedBlobs, blobKey)
+		}
+	}
+	sort.Strings(unreferencedBlobs)
+	stats.unreferencedBlobs = len(unreferencedBlobs)
+	for _, key := range unreferencedBlobs {
+		stats.unreferencedBytes += blobs[key].size
+	}
+
+	if !deleteMode {
+		return stats, nil
+	}
+
+	if err := deleteOfflineObjects(store, bucket, unreferencedBlobs, &stats); err != nil {
+		return stats, fmt.Errorf("delete unreferenced blobs: %w", err)
+	}
+	return stats, nil
+}
+
+func listOfflineObjects(store maintenanceObjectStore, bucket, prefix string, stats *offlineGCStats) ([]offlineObject, error) {
+	objects := make([]offlineObject, 0)
+	seenKeys := make(map[string]struct{})
+	var continuationToken *string
+	var previousToken string
+	for {
+		input := &s3.ListObjectsV2Input{
+			Bucket:  aws.String(bucket),
+			MaxKeys: aws.Int64(1000),
+			Prefix:  aws.String(prefix),
+		}
+		if continuationToken != nil {
+			input.ContinuationToken = continuationToken
+		}
+		stats.listRequests++
+		page, err := store.ListObjectsV2(input)
+		if err != nil {
+			return nil, err
+		}
+		if page == nil || page.IsTruncated == nil {
+			return nil, errors.New("listing returned a malformed page")
+		}
+		for _, object := range page.Contents {
+			if object == nil || object.Key == nil || *object.Key == "" {
+				return nil, errors.New("listing contained an object without a key")
+			}
+			if !strings.HasPrefix(*object.Key, prefix) {
+				return nil, fmt.Errorf("listing for %s returned key %s outside the prefix", prefix, *object.Key)
+			}
+			if object.Size == nil || *object.Size < 0 {
+				return nil, fmt.Errorf("listing returned invalid size for key %s", *object.Key)
+			}
+			if _, duplicate := seenKeys[*object.Key]; duplicate {
+				return nil, fmt.Errorf("listing returned duplicate key %s", *object.Key)
+			}
+			seenKeys[*object.Key] = struct{}{}
+			objects = append(objects, offlineObject{key: *object.Key, size: *object.Size})
+		}
+		truncated := *page.IsTruncated
+		if !truncated {
+			return objects, nil
+		}
+		if page.NextContinuationToken == nil || *page.NextContinuationToken == "" {
+			return nil, errors.New("truncated listing did not provide a continuation token")
+		}
+		if previousToken == *page.NextContinuationToken {
+			return nil, errors.New("listing continuation token did not advance")
+		}
+		previousToken = *page.NextContinuationToken
+		continuationToken = page.NextContinuationToken
+	}
+}
+
+func readOfflineAliasRecord(store maintenanceObjectStore, bucket, aliasKey string, stats *offlineGCStats) (aliasRecord, error) {
+	stats.getRequests++
+	output, err := store.GetObject(&s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(aliasKey),
+	})
+	if err != nil {
+		return aliasRecord{}, err
+	}
+	if output == nil || output.Body == nil {
+		return aliasRecord{}, errors.New("GET returned no body")
+	}
+	defer output.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(output.Body, 64*1024+1))
+	if err != nil {
+		return aliasRecord{}, fmt.Errorf("read body: %w", err)
+	}
+	if len(payload) > 64*1024 {
+		return aliasRecord{}, errors.New("alias body exceeds 64 KiB")
+	}
+	var record aliasRecord
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	if err := decoder.Decode(&record); err != nil {
+		return record, err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return record, errors.New("alias body contains trailing JSON")
+		}
+		return record, fmt.Errorf("alias body contains trailing data: %w", err)
+	}
+	if err := validateAliasRecord(record); err != nil {
+		return record, err
+	}
+	if _, err := time.Parse(time.RFC3339, record.CreatedAt); err != nil {
+		return record, fmt.Errorf("invalid createdAt: %w", err)
+	}
+	return record, nil
+}
+
+func validateAliasRecord(record aliasRecord) error {
+	if record.Version != 1 || !isValidBlobKey(record.BlobKey) || record.Size < 0 {
+		return errors.New("invalid alias record")
+	}
+	if _, err := time.Parse(time.RFC3339, record.ExpiresAt); err != nil {
+		return errors.New("invalid alias expiration")
+	}
+	if _, _, err := mime.ParseMediaType(record.ContentType); err != nil {
+		return errors.New("invalid alias content type")
+	}
+	return nil
+}
+
+func deleteOfflineObjects(store maintenanceObjectStore, bucket string, keys []string, stats *offlineGCStats) error {
+	for start := 0; start < len(keys); start += 1000 {
+		end := start + 1000
+		if end > len(keys) {
+			end = len(keys)
+		}
+		identifiers := make([]*s3.ObjectIdentifier, 0, end-start)
+		for _, key := range keys[start:end] {
+			identifiers = append(identifiers, &s3.ObjectIdentifier{Key: aws.String(key)})
+		}
+		if len(identifiers) == 0 {
+			continue
+		}
+		stats.deleteObjectsRequests++
+		output, err := store.DeleteObjects(&s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &s3.Delete{Objects: identifiers, Quiet: aws.Bool(true)},
+		})
+		if err != nil {
+			return err
+		}
+		if output == nil {
+			return errors.New("DeleteObjects returned no result")
+		}
+		if len(output.Errors) > 0 {
+			first := output.Errors[0]
+			if first == nil {
+				return errors.New("DeleteObjects returned an unspecified object error")
+			}
+			return fmt.Errorf("DeleteObjects failed for key %q: code=%s message=%s", aws.StringValue(first.Key), aws.StringValue(first.Code), aws.StringValue(first.Message))
+		}
+	}
+	return nil
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {

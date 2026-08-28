@@ -83,13 +83,19 @@ source ~/.bashrc
 
 `ENABLE_DEDUP` 控制带有效期上传的 SHA-256 内容哈希去重，默认值为 `true`。浏览器始终完整上传文件，服务端接收完成后计算哈希并进行存储去重。只有同时配置 `DEDUP_SECRET` 时去重才会生效；一次性下载仍使用随机对象 key。
 
-`DEDUP_SECRET` 是启用安全去重的必需服务端私钥，建议使用至少 32 字节的随机值。服务端完整接收带有效期的上传后计算 SHA-256，通过 `HMAC-SHA256(DEDUP_SECRET, 内容哈希)` 派生内部 blob key。相同字节共享一份不可变的 `b/` blob；每次上传都会生成新的随机 `a/` alias，独立保存有效期、Content-Type 和 blob 引用。下载 URL 只暴露 alias，因此一个上传过期不会使相同内容的其他 alias 提前失效。过期后只删除 alias。共享 blob 当前不会自动回收，最后一个 alias 过期后可能继续累积；引用感知的垃圾回收将作为后续独立功能实现。缺少 secret 时回退为随机 key 上传，不启用去重。
+`DEDUP_SECRET` 是启用安全去重的必需服务端私钥，建议使用至少 32 字节的随机值。服务端完整接收带有效期的上传后计算 SHA-256，通过 `HMAC-SHA256(DEDUP_SECRET, 内容哈希)` 派生内部 blob key。相同字节共享一份不可变的 `b/` blob；每次上传都会生成新的随机 `a/` alias，独立保存有效期、Content-Type 和 blob 引用。下载 URL 只暴露 alias，因此一个上传过期不会使相同内容的其他 alias 提前失效。过期后只删除 alias。共享 blob 通过下文的冻结写入维护流程回收；日常清理器会跳过 `b/`，因为上传进行时无法证明共享 blob 已经没有 alias 引用。缺少 secret 时回退为随机 key 上传，不启用去重。
 
 `X-Content-SHA256` 仅是可选的完整性校验声明，不是去重前提；服务端会自行计算并校验内容哈希。
 
 Worker 请勿将 `DEDUP_SECRET` 写入 `wrangler.toml`，使用 `npx wrangler secret put DEDUP_SECRET` 配置；本地开发写入 `.dev.vars`，不要提交该文件。轮换 secret 会建立新的去重 namespace；已有 alias 保存了完整 blob 引用，因此仍可使用到各自过期。
 
 早期去重格式创建的 `c/` 链接继续兼容下载，并按原有过期元数据清理。
+
+### 共享 blob 垃圾回收（维护窗口）
+
+Go 命令会在停止所有写入者后完成 `a/` 到 `b/` 的引用扫描。先运行 `./bashupload gc --offline --dry-run` 查看报告，确认没有扫描错误后，再显式运行 `./bashupload gc --offline --delete`。完整的停止写入、dry-run、删除、重启和请求成本流程见 [Go 部署指南](docker/go/README.md#shared-blob-garbage-collection-maintenance-window)。
+
+冻结范围必须包括所有 Go/Worker 实例、旧版本二进制、上传脚本和会修改 R2 的定时任务；下载入口可以保持只读。维护命令只扫描 `a/` 和 `b/`，按批删除没有引用的 `b/` 对象，不删除过期 alias。日常清理仍负责 alias、临时对象和旧 `c/` 对象；已有 `c/` 链接继续兼容。如果有任何写入者无法停止，不要使用 `--delete`。
 
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
 
