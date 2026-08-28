@@ -38,6 +38,16 @@ data:
                 return 200 '{{ .Values.nginx.healthCheckResponse }}';
             }
 
+            location = /readyz {
+                proxy_pass http://127.0.0.1:{{ .Values.config.port }}/readyz;
+                proxy_connect_timeout 1s;
+                proxy_read_timeout 1s;
+            }
+
+            location = /-/drain {
+                return 404;
+            }
+
             location / {
                 proxy_pass http://127.0.0.1:{{ .Values.config.port }};
                 proxy_set_header Host $host;

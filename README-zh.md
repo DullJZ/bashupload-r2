@@ -93,9 +93,9 @@ Worker 请勿将 `DEDUP_SECRET` 写入 `wrangler.toml`，使用 `npx wrangler se
 
 ### 共享 blob 垃圾回收（维护窗口）
 
-Go 命令会在停止所有写入者后完成 `a/` 到 `b/` 的引用扫描。先运行 `./bashupload gc --offline --dry-run` 查看报告，确认没有扫描错误后，再显式运行 `./bashupload gc --offline --delete`。GC 默认在 alias 到期后继续保护 blob 15 分钟，以容忍小幅时钟偏差；运行前仍应确认维护节点时间已经同步。完整的停止写入、grace 配置、dry-run、删除、重启和请求成本流程见 [Go 部署指南](docker/go/README.md#shared-blob-garbage-collection-maintenance-window)。
+Go 命令会在应用流量完全停止后完成 `a/` 到 `b/` 的引用扫描。先从入口摘除服务并优雅排空正在进行的上传和下载，再停止所有应用实例及其他 R2 写入者。运行 `./bashupload gc --offline --dry-run` 查看报告，确认没有扫描错误后，再显式运行 `./bashupload gc --offline --delete`。GC 默认在 alias 到期后继续保护 blob 15 分钟，以容忍小幅时钟偏差；运行前仍应确认维护节点时间已经同步。完整的停流、grace 配置、dry-run、删除、重启和请求成本流程见 [Go 部署指南](docker/go/README.md#shared-blob-garbage-collection-maintenance-window)。
 
-冻结范围必须包括所有 Go/Worker 实例、旧版本二进制、上传脚本和会修改 R2 的定时任务；下载入口可以保持只读。维护命令只扫描 `a/` 和 `b/`，按批删除没有引用的 `b/` 对象，不删除过期 alias。日常清理仍负责 alias、临时对象和旧 `c/` 对象；已有 `c/` 链接继续兼容。如果有任何写入者无法停止，不要使用 `--delete`。
+维护窗口必须包括所有 Go/Worker 实例、旧版本二进制、上传脚本和会修改 R2 的定时任务；标准方案也会停止应用下载流量。维护命令只扫描 `a/` 和 `b/`，按批删除没有引用的 `b/` 对象，不删除过期 alias。日常清理仍负责 alias、临时对象和旧 `c/` 对象；已有 `c/` 链接继续兼容。如果有任何写入者无法停止，不要使用 `--delete`。
 
 `SHORT_URL_SERVICE` 是短链接服务的 API 端点（默认为 `https://suosuo.de/short`），如果需要，可以将其更改为您自己的短链接服务。仅支持 [MyUrls](https://github.com/CareyWang/MyUrls)。
 

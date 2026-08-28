@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"container/heap"
+	"context"
 	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
@@ -19,10 +22,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -60,6 +67,11 @@ type offlineGCStats struct {
 	listRequests          int
 	getRequests           int
 	deleteObjectsRequests int
+	deleteAttempted       int
+	deleteConfirmed       int
+	deleteFailed          int
+	deleteUnknown         int
+	deleteUnstarted       int
 	aliasesScanned        int
 	liveAliases           int
 	expiredAliases        int
@@ -70,9 +82,19 @@ type offlineGCStats struct {
 
 const defaultOfflineGCExpiryGrace = 15 * time.Minute
 
+const (
+	defaultOfflineGCSortChunkEntries = 10000
+	maxOfflineGCSortChunkEntries     = 100000
+	offlineGCMergeFanIn              = 32
+	offlineGCMaxKeyBytes             = 1024
+	offlineGCMaxTokenBytes           = 1024 * 1024
+)
+
 type offlineGCOptions struct {
-	deleteMode  bool
-	expiryGrace time.Duration
+	deleteMode       bool
+	expiryGrace      time.Duration
+	workDir          string
+	sortChunkEntries int
 }
 
 // maintenanceObjectStore is the small subset of the S3 client required by
@@ -178,42 +200,142 @@ func main() {
 		os.Exit(runGCCommand(os.Args[2:]))
 	}
 
-	// 启动定时清理任务
-	if disableCleanup {
-		log.Printf("Scheduled cleanup disabled via NO_CLEANUP")
-	} else {
-		go func() {
-			// 启动后10秒执行第一次清理
-			time.Sleep(10 * time.Second)
-			cleanupExpiredFiles()
-
-			// 每5分钟清理一次
-			ticker := time.NewTicker(5 * time.Minute)
-			defer ticker.Stop()
-
-			for range ticker.C {
-				cleanupExpiredFiles()
-			}
-		}()
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("Failed to listen on port %s: %v", port, err)
 	}
 
-	// 设置路由
-	http.HandleFunc("/", handleRequest)
-	http.HandleFunc("/api/config", handleConfig)
-	http.HandleFunc("/short", handleShort)
-	http.HandleFunc("/short/", handleShort)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var ready atomic.Bool
+	server := &http.Server{
+		Handler:           newHTTPHandler(&ready),
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	cleanupCtx, stopCleanup := context.WithCancel(ctx)
+	defer stopCleanup()
+	cleanupDone := startScheduledCleanup(cleanupCtx, disableCleanup, 10*time.Second, 5*time.Minute, cleanupExpiredFiles)
 
 	log.Printf("Server starting on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := serveUntilShutdown(ctx, listener, server, &ready, stopCleanup, cleanupDone); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func newHTTPHandler(ready *atomic.Bool) http.Handler {
+	application := http.NewServeMux()
+	application.HandleFunc("/", handleRequest)
+	application.HandleFunc("/api/config", handleConfig)
+	application.HandleFunc("/short", handleShort)
+	application.HandleFunc("/short/", handleShort)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/-/drain", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil || !net.ParseIP(host).IsLoopback() {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		ready.Store(false)
+		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ready.Load() {
+			w.Header().Set("Connection", "close")
+			http.Error(w, "server is draining", http.StatusServiceUnavailable)
+			return
+		}
+		application.ServeHTTP(w, r)
+	}))
+	return mux
+}
+
+func serveUntilShutdown(ctx context.Context, listener net.Listener, server *http.Server, ready *atomic.Bool, stopCleanup context.CancelFunc, cleanupDone <-chan struct{}) error {
+	serveErr := make(chan error, 1)
+	ready.Store(true)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveErr:
+		ready.Store(false)
+		stopCleanup()
+		<-cleanupDone
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("HTTP server failed: %w", err)
+	case <-ctx.Done():
+		ready.Store(false)
+		stopCleanup()
+		log.Printf("Shutdown requested; draining active requests")
+		if err := server.Shutdown(context.Background()); err != nil {
+			return fmt.Errorf("HTTP server shutdown failed: %w", err)
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("HTTP server failed during shutdown: %w", err)
+		}
+		<-cleanupDone
+		log.Printf("Shutdown complete")
+		return nil
+	}
+}
+
+func startScheduledCleanup(ctx context.Context, disabled bool, initialDelay, interval time.Duration, cleanup func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if disabled {
+			log.Printf("Scheduled cleanup disabled via NO_CLEANUP")
+			return
+		}
+
+		initialTimer := time.NewTimer(initialDelay)
+		defer initialTimer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-initialTimer.C:
+			cleanup()
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cleanup()
+			}
+		}
+	}()
+	return done
 }
 
 func runGCCommand(args []string) int {
 	options, err := parseOfflineGCArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		fmt.Fprintln(os.Stderr, "usage: bashupload gc --offline [--dry-run | --delete] [--expiry-grace DURATION]")
+		fmt.Fprintln(os.Stderr, "usage: bashupload gc --offline [--dry-run | --delete] [--expiry-grace DURATION] [--work-dir DIR] [--sort-chunk-entries N]")
 		return 2
 	}
 
@@ -227,7 +349,10 @@ func runGCCommand(args []string) int {
 }
 
 func parseOfflineGCArgs(args []string) (offlineGCOptions, error) {
-	options := offlineGCOptions{expiryGrace: defaultOfflineGCExpiryGrace}
+	options := offlineGCOptions{
+		expiryGrace:      defaultOfflineGCExpiryGrace,
+		sortChunkEntries: defaultOfflineGCSortChunkEntries,
+	}
 	if len(args) == 0 || args[0] != "--offline" {
 		return offlineGCOptions{}, errors.New("--offline confirmation is required")
 	}
@@ -256,6 +381,22 @@ func parseOfflineGCArgs(args []string) (offlineGCOptions, error) {
 				return offlineGCOptions{}, err
 			}
 			options.expiryGrace = grace
+		case "--work-dir":
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
+				return offlineGCOptions{}, errors.New("--work-dir requires a directory")
+			}
+			i++
+			options.workDir = args[i]
+		case "--sort-chunk-entries":
+			if i+1 >= len(args) {
+				return offlineGCOptions{}, errors.New("--sort-chunk-entries requires a positive integer")
+			}
+			i++
+			value, err := parsePositiveIntOption("--sort-chunk-entries", args[i])
+			if err != nil {
+				return offlineGCOptions{}, err
+			}
+			options.sortChunkEntries = value
 		default:
 			if strings.HasPrefix(arg, "--expiry-grace=") {
 				grace, err := parseOfflineGCExpiryGrace(strings.TrimPrefix(arg, "--expiry-grace="))
@@ -265,10 +406,36 @@ func parseOfflineGCArgs(args []string) (offlineGCOptions, error) {
 				options.expiryGrace = grace
 				continue
 			}
+			if strings.HasPrefix(arg, "--work-dir=") {
+				options.workDir = strings.TrimPrefix(arg, "--work-dir=")
+				if options.workDir == "" {
+					return offlineGCOptions{}, errors.New("--work-dir requires a directory")
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--sort-chunk-entries=") {
+				value, err := parsePositiveIntOption("--sort-chunk-entries", strings.TrimPrefix(arg, "--sort-chunk-entries="))
+				if err != nil {
+					return offlineGCOptions{}, err
+				}
+				options.sortChunkEntries = value
+				continue
+			}
 			return offlineGCOptions{}, fmt.Errorf("unknown gc option %q", arg)
 		}
 	}
 	return options, nil
+}
+
+func parsePositiveIntOption(name, value string) (int, error) {
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be a positive integer", name, value)
+	}
+	if name == "--sort-chunk-entries" && parsed > maxOfflineGCSortChunkEntries {
+		return 0, fmt.Errorf("invalid %s %q: must not exceed %d", name, value, maxOfflineGCSortChunkEntries)
+	}
+	return int(parsed), nil
 }
 
 func parseOfflineGCExpiryGrace(value string) (time.Duration, error) {
@@ -287,6 +454,7 @@ func printOfflineGCReport(stats offlineGCStats, options offlineGCOptions) {
 	plannedDeleteRequests := (stats.unreferencedBlobs + 999) / 1000
 	fmt.Printf("[Offline GC] mode=%s expiryGrace=%s aliases=%d liveAliases=%d expiredAliases=%d blobs=%d unreferencedBlobs=%d orphanBytes=%d\n", mode, options.expiryGrace, stats.aliasesScanned, stats.liveAliases, stats.expiredAliases, stats.blobsScanned, stats.unreferencedBlobs, stats.unreferencedBytes)
 	fmt.Printf("[Offline GC] LIST requests=%d GET requests=%d DeleteObjects requests=%d plannedDeleteObjectsRequests=%d\n", stats.listRequests, stats.getRequests, stats.deleteObjectsRequests, plannedDeleteRequests)
+	fmt.Printf("[Offline GC] delete attempted=%d confirmed=%d failed=%d unknown=%d unstarted=%d\n", stats.deleteAttempted, stats.deleteConfirmed, stats.deleteFailed, stats.deleteUnknown, stats.deleteUnstarted)
 }
 
 // runOfflineGC builds a complete reference snapshot while the service is in a
@@ -301,84 +469,437 @@ func runOfflineGCWithStore(store maintenanceObjectStore, bucket string, now time
 	if options.expiryGrace < 0 {
 		return stats, errors.New("expiry grace must not be negative")
 	}
+	if options.sortChunkEntries == 0 {
+		options.sortChunkEntries = defaultOfflineGCSortChunkEntries
+	}
+	if options.sortChunkEntries < 0 {
+		return stats, errors.New("sort chunk entries must be positive")
+	}
+	if options.sortChunkEntries > maxOfflineGCSortChunkEntries {
+		return stats, fmt.Errorf("sort chunk entries must not exceed %d", maxOfflineGCSortChunkEntries)
+	}
+	tempDir, err := os.MkdirTemp(options.workDir, "bashupload-gc-")
+	if err != nil {
+		return stats, fmt.Errorf("create GC work directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
 
-	aliasObjects, err := listOfflineObjects(store, bucket, "a/", &stats)
+	livePath, err := buildSortedLiveReferences(store, bucket, now, options, tempDir, &stats)
 	if err != nil {
 		return stats, fmt.Errorf("scan aliases: %w", err)
 	}
-	blobObjects, err := listOfflineObjects(store, bucket, "b/", &stats)
+	manifestPath, err := buildOrphanManifest(store, bucket, livePath, tempDir, &stats)
 	if err != nil {
 		return stats, fmt.Errorf("scan blobs: %w", err)
 	}
-
-	liveReferences := make(map[string]string)
-	for _, object := range aliasObjects {
-		stats.aliasesScanned++
-		record, readErr := readOfflineAliasRecord(store, bucket, object.key, &stats)
-		if readErr != nil {
-			return stats, fmt.Errorf("validate alias %s: %w", object.key, readErr)
-		}
-		expiresAt, parseErr := time.Parse(time.RFC3339, record.ExpiresAt)
-		if parseErr != nil {
-			return stats, fmt.Errorf("alias %s has invalid expiresAt: %w", object.key, parseErr)
-		}
-		if now.Before(expiresAt.Add(options.expiryGrace)) {
-			stats.liveAliases++
-			if _, exists := liveReferences[record.BlobKey]; !exists {
-				liveReferences[record.BlobKey] = object.key
-			}
-		} else {
-			stats.expiredAliases++
-		}
-	}
-
-	blobs := make(map[string]offlineObject, len(blobObjects))
-	for _, object := range blobObjects {
-		if !isValidBlobKey(object.key) {
-			return stats, fmt.Errorf("blob %s has an invalid key", object.key)
-		}
-		if _, duplicate := blobs[object.key]; duplicate {
-			return stats, fmt.Errorf("duplicate blob key %s in listing", object.key)
-		}
-		blobs[object.key] = object
-		stats.blobsScanned++
-	}
-
-	// Only live aliases protect content. Expired aliases are handled by the
-	// normal scheduled cleanup; an already-missing target of an expired alias
-	// must not block reclaiming unrelated orphan blobs.
-	for blobKey, aliasKey := range liveReferences {
-		if _, exists := blobs[blobKey]; !exists {
-			return stats, fmt.Errorf("live alias %s references missing blob %s", aliasKey, blobKey)
-		}
-	}
-
-	unreferencedBlobs := make([]string, 0)
-	for blobKey := range blobs {
-		if _, referenced := liveReferences[blobKey]; !referenced {
-			unreferencedBlobs = append(unreferencedBlobs, blobKey)
-		}
-	}
-	sort.Strings(unreferencedBlobs)
-	stats.unreferencedBlobs = len(unreferencedBlobs)
-	for _, key := range unreferencedBlobs {
-		stats.unreferencedBytes += blobs[key].size
-	}
-
 	if !options.deleteMode {
+		stats.deleteUnstarted = stats.unreferencedBlobs
 		return stats, nil
 	}
-
-	if err := deleteOfflineObjects(store, bucket, unreferencedBlobs, &stats); err != nil {
+	stats.deleteUnstarted = stats.unreferencedBlobs
+	if err := deleteOfflineManifest(store, bucket, manifestPath, &stats); err != nil {
 		return stats, fmt.Errorf("delete unreferenced blobs: %w", err)
 	}
 	return stats, nil
 }
 
-func listOfflineObjects(store maintenanceObjectStore, bucket, prefix string, stats *offlineGCStats) ([]offlineObject, error) {
-	objects := make([]offlineObject, 0)
-	seenKeys := make(map[string]struct{})
-	seenContinuationTokens := make(map[string]struct{})
+type offlineLiveReference struct {
+	BlobKey  string `json:"blobKey"`
+	AliasKey string `json:"aliasKey"`
+}
+
+type offlineManifestEntry struct {
+	Key  string `json:"key"`
+	Size int64  `json:"size"`
+}
+
+func buildSortedLiveReferences(store maintenanceObjectStore, bucket string, now time.Time, options offlineGCOptions, tempDir string, stats *offlineGCStats) (string, error) {
+	chunk := make([]offlineLiveReference, 0, options.sortChunkEntries)
+	indexFile, err := os.CreateTemp(tempDir, "live-index-")
+	if err != nil {
+		return "", err
+	}
+	indexPath := indexFile.Name()
+	indexWriter := bufio.NewWriter(indexFile)
+	indexEncoder := json.NewEncoder(indexWriter)
+	chunkCount := 0
+	flush := func() error {
+		if len(chunk) == 0 {
+			return nil
+		}
+		path, err := writeLiveReferenceChunk(tempDir, chunk)
+		if err != nil {
+			return err
+		}
+		if err := indexEncoder.Encode(path); err != nil {
+			return err
+		}
+		chunkCount++
+		chunk = chunk[:0]
+		return nil
+	}
+	err = walkOfflineObjects(store, bucket, "a/", tempDir, stats, func(object offlineObject) error {
+		stats.aliasesScanned++
+		record, err := readOfflineAliasRecord(store, bucket, object.key, stats)
+		if err != nil {
+			return fmt.Errorf("validate alias %s: %w", object.key, err)
+		}
+		expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
+		if err != nil {
+			return fmt.Errorf("alias %s has invalid expiresAt: %w", object.key, err)
+		}
+		if !now.Before(expiresAt.Add(options.expiryGrace)) {
+			stats.expiredAliases++
+			return nil
+		}
+		stats.liveAliases++
+		chunk = append(chunk, offlineLiveReference{BlobKey: record.BlobKey, AliasKey: object.key})
+		if len(chunk) == options.sortChunkEntries {
+			return flush()
+		}
+		return nil
+	})
+	if err != nil {
+		indexFile.Close()
+		return "", err
+	}
+	if err := flush(); err != nil {
+		indexFile.Close()
+		return "", err
+	}
+	if err := indexWriter.Flush(); err != nil {
+		indexFile.Close()
+		return "", err
+	}
+	if err := indexFile.Close(); err != nil {
+		return "", err
+	}
+	return mergeLiveReferenceChunkIndex(tempDir, indexPath, chunkCount)
+}
+
+func writeLiveReferenceChunk(tempDir string, records []offlineLiveReference) (string, error) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].BlobKey == records[j].BlobKey {
+			return records[i].AliasKey < records[j].AliasKey
+		}
+		return records[i].BlobKey < records[j].BlobKey
+	})
+	file, err := os.CreateTemp(tempDir, "live-chunk-")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	writer := bufio.NewWriter(file)
+	encoder := json.NewEncoder(writer)
+	last := ""
+	for _, record := range records {
+		if record.BlobKey == last {
+			continue
+		}
+		if err := encoder.Encode(record); err != nil {
+			file.Close()
+			return "", err
+		}
+		last = record.BlobKey
+	}
+	if err := writer.Flush(); err != nil {
+		file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+type liveMergeSource struct {
+	file    *os.File
+	decoder *json.Decoder
+}
+
+type liveMergeItem struct {
+	record offlineLiveReference
+	source int
+}
+
+type liveMergeHeap []liveMergeItem
+
+func (h liveMergeHeap) Len() int { return len(h) }
+func (h liveMergeHeap) Less(i, j int) bool {
+	if h[i].record.BlobKey == h[j].record.BlobKey {
+		return h[i].record.AliasKey < h[j].record.AliasKey
+	}
+	return h[i].record.BlobKey < h[j].record.BlobKey
+}
+func (h liveMergeHeap) Swap(i, j int)           { h[i], h[j] = h[j], h[i] }
+func (h *liveMergeHeap) Push(value interface{}) { *h = append(*h, value.(liveMergeItem)) }
+func (h *liveMergeHeap) Pop() interface{} {
+	old := *h
+	item := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return item
+}
+
+func mergeLiveReferenceChunkIndex(tempDir, indexPath string, count int) (string, error) {
+	if count == 0 {
+		os.Remove(indexPath)
+		file, err := os.CreateTemp(tempDir, "live-empty-")
+		if err != nil {
+			return "", err
+		}
+		path := file.Name()
+		return path, file.Close()
+	}
+	for count > 1 {
+		input, err := os.Open(indexPath)
+		if err != nil {
+			return "", err
+		}
+		decoder := json.NewDecoder(bufio.NewReader(input))
+		nextIndex, err := os.CreateTemp(tempDir, "live-index-")
+		if err != nil {
+			input.Close()
+			return "", err
+		}
+		nextWriter := bufio.NewWriter(nextIndex)
+		nextEncoder := json.NewEncoder(nextWriter)
+		nextCount := 0
+		for {
+			paths := make([]string, 0, offlineGCMergeFanIn)
+			for len(paths) < offlineGCMergeFanIn {
+				var path string
+				err := decoder.Decode(&path)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					input.Close()
+					nextIndex.Close()
+					return "", err
+				}
+				paths = append(paths, path)
+			}
+			if len(paths) == 0 {
+				break
+			}
+			merged, err := mergeLiveReferenceBatch(tempDir, paths)
+			if err != nil {
+				input.Close()
+				nextIndex.Close()
+				return "", err
+			}
+			if err := nextEncoder.Encode(merged); err != nil {
+				input.Close()
+				nextIndex.Close()
+				return "", err
+			}
+			nextCount++
+			for _, path := range paths {
+				if err := os.Remove(path); err != nil {
+					input.Close()
+					nextIndex.Close()
+					return "", err
+				}
+			}
+		}
+		if err := input.Close(); err != nil {
+			nextIndex.Close()
+			return "", err
+		}
+		if err := nextWriter.Flush(); err != nil {
+			nextIndex.Close()
+			return "", err
+		}
+		if err := nextIndex.Close(); err != nil {
+			return "", err
+		}
+		if err := os.Remove(indexPath); err != nil {
+			return "", err
+		}
+		indexPath = nextIndex.Name()
+		count = nextCount
+	}
+	index, err := os.Open(indexPath)
+	if err != nil {
+		return "", err
+	}
+	var result string
+	err = json.NewDecoder(index).Decode(&result)
+	closeErr := index.Close()
+	if err != nil {
+		return "", err
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	if err := os.Remove(indexPath); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+func mergeLiveReferenceBatch(tempDir string, paths []string) (string, error) {
+	sources := make([]liveMergeSource, len(paths))
+	defer func() {
+		for i := range sources {
+			if sources[i].file != nil {
+				sources[i].file.Close()
+			}
+		}
+	}()
+	items := &liveMergeHeap{}
+	for i, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		sources[i] = liveMergeSource{file: file, decoder: json.NewDecoder(bufio.NewReader(file))}
+		var record offlineLiveReference
+		if err := sources[i].decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				continue
+			}
+			return "", err
+		}
+		heap.Push(items, liveMergeItem{record: record, source: i})
+	}
+	output, err := os.CreateTemp(tempDir, "live-merged-")
+	if err != nil {
+		return "", err
+	}
+	outputPath := output.Name()
+	writer := bufio.NewWriter(output)
+	encoder := json.NewEncoder(writer)
+	last := ""
+	for items.Len() > 0 {
+		item := heap.Pop(items).(liveMergeItem)
+		if item.record.BlobKey != last {
+			if err := encoder.Encode(item.record); err != nil {
+				output.Close()
+				return "", err
+			}
+			last = item.record.BlobKey
+		}
+		var next offlineLiveReference
+		err := sources[item.source].decoder.Decode(&next)
+		if err == nil {
+			heap.Push(items, liveMergeItem{record: next, source: item.source})
+		} else if err != io.EOF {
+			output.Close()
+			return "", err
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		output.Close()
+		return "", err
+	}
+	if err := output.Close(); err != nil {
+		return "", err
+	}
+	return outputPath, nil
+}
+
+func buildOrphanManifest(store maintenanceObjectStore, bucket, livePath, tempDir string, stats *offlineGCStats) (string, error) {
+	liveFile, err := os.Open(livePath)
+	if err != nil {
+		return "", err
+	}
+	defer liveFile.Close()
+	liveDecoder := json.NewDecoder(bufio.NewReader(liveFile))
+	var live *offlineLiveReference
+	readLive := func() error {
+		var record offlineLiveReference
+		if err := liveDecoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				live = nil
+				return nil
+			}
+			return err
+		}
+		live = &record
+		return nil
+	}
+	if err := readLive(); err != nil {
+		return "", err
+	}
+	manifest, err := os.CreateTemp(tempDir, "orphan-manifest-")
+	if err != nil {
+		return "", err
+	}
+	manifestPath := manifest.Name()
+	writer := bufio.NewWriter(manifest)
+	encoder := json.NewEncoder(writer)
+	err = walkOfflineObjects(store, bucket, "b/", tempDir, stats, func(object offlineObject) error {
+		if !isValidBlobKey(object.key) {
+			return fmt.Errorf("blob %s has an invalid key", object.key)
+		}
+		stats.blobsScanned++
+		if live != nil && live.BlobKey < object.key {
+			return fmt.Errorf("live alias %s references missing blob %s", live.AliasKey, live.BlobKey)
+		}
+		if live != nil && live.BlobKey == object.key {
+			return readLive()
+		}
+		if err := encoder.Encode(offlineManifestEntry{Key: object.key, Size: object.size}); err != nil {
+			return err
+		}
+		stats.unreferencedBlobs++
+		stats.unreferencedBytes += object.size
+		return nil
+	})
+	if err == nil && live != nil {
+		err = fmt.Errorf("live alias %s references missing blob %s", live.AliasKey, live.BlobKey)
+	}
+	if flushErr := writer.Flush(); err == nil && flushErr != nil {
+		err = flushErr
+	}
+	if closeErr := manifest.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", err
+	}
+	return manifestPath, nil
+}
+
+func deleteOfflineManifest(store maintenanceObjectStore, bucket, manifestPath string, stats *offlineGCStats) error {
+	file, err := os.Open(manifestPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(bufio.NewReader(file))
+	batch := make([]string, 0, 1000)
+	for {
+		var entry offlineManifestEntry
+		err := decoder.Decode(&entry)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if !isValidBlobKey(entry.Key) || entry.Size < 0 {
+			return errors.New("orphan manifest contains an invalid entry")
+		}
+		batch = append(batch, entry.Key)
+		if len(batch) == cap(batch) {
+			if err := deleteOfflineObjects(store, bucket, batch, stats); err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+	}
+	return deleteOfflineObjects(store, bucket, batch, stats)
+}
+
+func walkOfflineObjects(store maintenanceObjectStore, bucket, prefix, tempDir string, stats *offlineGCStats, visit func(offlineObject) error) error {
+	tokenDir, err := os.MkdirTemp(tempDir, "pagination-tokens-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tokenDir)
+	lastKey := ""
 	var continuationToken *string
 	for {
 		input := &s3.ListObjectsV2Input{
@@ -392,41 +913,68 @@ func listOfflineObjects(store maintenanceObjectStore, bucket, prefix string, sta
 		stats.listRequests++
 		page, err := store.ListObjectsV2(input)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if page == nil || page.IsTruncated == nil {
-			return nil, errors.New("listing returned a malformed page")
+			return errors.New("listing returned a malformed page")
+		}
+		if len(page.Contents) > 1000 {
+			return errors.New("listing returned more objects than requested")
 		}
 		for _, object := range page.Contents {
 			if object == nil || object.Key == nil || *object.Key == "" {
-				return nil, errors.New("listing contained an object without a key")
+				return errors.New("listing contained an object without a key")
 			}
 			if !strings.HasPrefix(*object.Key, prefix) {
-				return nil, fmt.Errorf("listing for %s returned key %s outside the prefix", prefix, *object.Key)
+				return fmt.Errorf("listing for %s returned key %s outside the prefix", prefix, *object.Key)
+			}
+			if len(*object.Key) > offlineGCMaxKeyBytes {
+				return fmt.Errorf("listing returned an overlong key for prefix %s", prefix)
 			}
 			if object.Size == nil || *object.Size < 0 {
-				return nil, fmt.Errorf("listing returned invalid size for key %s", *object.Key)
+				return fmt.Errorf("listing returned invalid size for key %s", *object.Key)
 			}
-			if _, duplicate := seenKeys[*object.Key]; duplicate {
-				return nil, fmt.Errorf("listing returned duplicate key %s", *object.Key)
+			if lastKey != "" && *object.Key <= lastKey {
+				return fmt.Errorf("listing keys are not strictly increasing at %s", *object.Key)
 			}
-			seenKeys[*object.Key] = struct{}{}
-			objects = append(objects, offlineObject{key: *object.Key, size: *object.Size})
+			lastKey = *object.Key
+			if err := visit(offlineObject{key: *object.Key, size: *object.Size}); err != nil {
+				return err
+			}
 		}
 		truncated := *page.IsTruncated
 		if !truncated {
-			return objects, nil
+			return nil
 		}
 		if page.NextContinuationToken == nil || *page.NextContinuationToken == "" {
-			return nil, errors.New("truncated listing did not provide a continuation token")
+			return errors.New("truncated listing did not provide a continuation token")
 		}
 		nextToken := *page.NextContinuationToken
-		if _, seen := seenContinuationTokens[nextToken]; seen {
-			return nil, errors.New("listing continuation token did not advance")
+		if len(nextToken) > offlineGCMaxTokenBytes {
+			return errors.New("listing continuation token is too large")
 		}
-		seenContinuationTokens[nextToken] = struct{}{}
+		seen, err := offlineTokenSeenOrAdd(tokenDir, nextToken)
+		if err != nil {
+			return err
+		}
+		if seen {
+			return errors.New("listing continuation token did not advance")
+		}
 		continuationToken = aws.String(nextToken)
 	}
+}
+
+func offlineTokenSeenOrAdd(dir, token string) (bool, error) {
+	digest := sha256.Sum256([]byte(token))
+	path := filepath.Join(dir, hex.EncodeToString(digest[:]))
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, file.Close()
 }
 
 func readOfflineAliasRecord(store maintenanceObjectStore, bucket, aliasKey string, stats *offlineGCStats) (aliasRecord, error) {
@@ -484,6 +1032,9 @@ func validateAliasRecord(record aliasRecord) error {
 }
 
 func deleteOfflineObjects(store maintenanceObjectStore, bucket string, keys []string, stats *offlineGCStats) error {
+	if stats.deleteAttempted == 0 && stats.deleteUnstarted == 0 {
+		stats.deleteUnstarted = len(keys)
+	}
 	for start := 0; start < len(keys); start += 1000 {
 		end := start + 1000
 		if end > len(keys) {
@@ -496,24 +1047,88 @@ func deleteOfflineObjects(store maintenanceObjectStore, bucket string, keys []st
 		if len(identifiers) == 0 {
 			continue
 		}
+		batchSize := len(identifiers)
+		stats.deleteAttempted += batchSize
+		stats.deleteUnstarted -= batchSize
 		stats.deleteObjectsRequests++
 		output, err := store.DeleteObjects(&s3.DeleteObjectsInput{
 			Bucket: aws.String(bucket),
-			Delete: &s3.Delete{Objects: identifiers, Quiet: aws.Bool(true)},
+			Delete: &s3.Delete{Objects: identifiers, Quiet: aws.Bool(false)},
 		})
 		if err != nil {
+			stats.deleteUnknown += batchSize
 			return err
 		}
 		if output == nil {
+			stats.deleteUnknown += batchSize
 			return errors.New("DeleteObjects returned no result")
 		}
-		if len(output.Errors) > 0 {
-			first := output.Errors[0]
-			if first == nil {
-				return errors.New("DeleteObjects returned an unspecified object error")
-			}
-			return fmt.Errorf("DeleteObjects failed for key %q: code=%s message=%s", aws.StringValue(first.Key), aws.StringValue(first.Code), aws.StringValue(first.Message))
+		if err := accountDeleteObjectsResult(keys[start:end], output, stats); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func accountDeleteObjectsResult(keys []string, output *s3.DeleteObjectsOutput, stats *offlineGCStats) error {
+	type outcome struct {
+		count  int
+		failed bool
+	}
+	requested := make(map[string]struct{}, len(keys))
+	results := make(map[string]outcome, len(keys))
+	for _, key := range keys {
+		requested[key] = struct{}{}
+	}
+
+	problems := make([]string, 0)
+	for _, deleted := range output.Deleted {
+		if deleted == nil || deleted.Key == nil || *deleted.Key == "" {
+			problems = append(problems, "DeleteObjects returned a Deleted entry without a key")
+			continue
+		}
+		key := *deleted.Key
+		if _, ok := requested[key]; !ok {
+			problems = append(problems, fmt.Sprintf("DeleteObjects returned unexpected Deleted key %q", key))
+			continue
+		}
+		result := results[key]
+		result.count++
+		results[key] = result
+	}
+	for _, objectErr := range output.Errors {
+		if objectErr == nil {
+			problems = append(problems, "DeleteObjects returned an unspecified object error")
+			continue
+		}
+		key := aws.StringValue(objectErr.Key)
+		problems = append(problems, fmt.Sprintf("DeleteObjects failed for key %q: code=%s message=%s", key, aws.StringValue(objectErr.Code), aws.StringValue(objectErr.Message)))
+		if _, ok := requested[key]; !ok || key == "" {
+			if key != "" {
+				problems = append(problems, fmt.Sprintf("DeleteObjects returned unexpected error key %q", key))
+			}
+			continue
+		}
+		result := results[key]
+		result.count++
+		result.failed = true
+		results[key] = result
+	}
+
+	for _, key := range keys {
+		result := results[key]
+		switch {
+		case result.count != 1:
+			stats.deleteUnknown++
+			problems = append(problems, fmt.Sprintf("DeleteObjects key %q appeared %d times in Deleted and Errors; want exactly once", key, result.count))
+		case result.failed:
+			stats.deleteFailed++
+		default:
+			stats.deleteConfirmed++
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -774,21 +1389,18 @@ func downloadFile(w http.ResponseWriter, r *http.Request, fileName string) {
 	// 流式传输文件
 	io.Copy(w, getOutput.Body)
 
-	// 一次性下载模式：异步删除文件
+	// Keep deletion inside the handler so graceful shutdown waits for the R2 write.
 	if isOneTime {
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			deleteInput := &s3.DeleteObjectInput{
-				Bucket: aws.String(bucketName),
-				Key:    aws.String(fileName),
-			}
-			_, err := s3Client.DeleteObject(deleteInput)
-			if err != nil {
-				log.Printf("[One-Time Download] Failed to delete file %s: %v", fileName, err)
-			} else {
-				log.Printf("[One-Time Download] Deleted file: %s", fileName)
-			}
-		}()
+		deleteInput := &s3.DeleteObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(fileName),
+		}
+		_, err := s3Client.DeleteObject(deleteInput)
+		if err != nil {
+			log.Printf("[One-Time Download] Failed to delete file %s: %v", fileName, err)
+		} else {
+			log.Printf("[One-Time Download] Deleted file: %s", fileName)
+		}
 	}
 }
 
@@ -1153,7 +1765,7 @@ func cleanupExpiredFiles() {
 				continue
 			}
 			if strings.HasPrefix(*obj.Key, "b/") {
-				// Blobs are shared and immutable. Reference-aware GC is not implemented yet.
+				// Blobs are shared and immutable; the offline GC reclaims them.
 				continue
 			}
 			if strings.HasPrefix(*obj.Key, "t/") {
@@ -1234,12 +1846,13 @@ func cleanupExpiredFiles() {
 		return true
 	})
 
+	// A paginated LIST can fail after earlier pages have launched workers.
+	// Always let those R2 operations finish before this cleanup run returns.
+	cleanupWG.Wait()
 	if err != nil {
 		log.Printf("[Scheduled Task] Error during cleanup: %v", err)
 		return
 	}
-
-	cleanupWG.Wait()
 	log.Printf("[Scheduled Task] Cleanup complete: checked %d files, deleted %d expired files", checkedCount, deletedCount)
 }
 

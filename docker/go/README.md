@@ -116,6 +116,7 @@ curl http://localhost:3000/short -T test.txt
 - `PASSWORD`: 上传密码保护（可选）
 - `SHORT_URL_SERVICE`: 短链接服务地址，默认 `https://suosuo.de/short`
 - `PORT`: 服务端口，默认 3000
+- `STOP_GRACE_PERIOD`: Docker Compose 停机时等待在途请求和 R2 操作完成的时间，默认 `11m`；必须大于最长上传、下载和清理操作的预期耗时
 - `UPLOAD_RATE_LIMIT`: 单 IP 每窗口最大上传次数，`0` 禁用，默认 10
 - `UPLOAD_RATE_LIMIT_WINDOW`: 上传限流窗口时长（秒），默认 60
 - `TRUST_PROXY_HEADERS`: 是否信任 `X-Real-IP`/`X-Forwarded-For` 识别客户端 IP，默认 `true`；服务直接暴露公网（无反向代理）时设为 `false`，防止伪造头绕过限流
@@ -128,7 +129,7 @@ curl http://localhost:3000/short -T test.txt
 
 ### 共享 blob 垃圾回收（维护窗口）
 
-Go 版本的 blob GC 在维护窗口中运行完整引用扫描。停止所有 Go 实例、旧版本二进制、Worker/上传脚本，以及会写入或删除 R2 对象的定时任务；等待正在进行的上传完成后再扫描。只有经过确认的只读入口可以继续提供下载，维护期间不能创建新的上传或 alias。多副本部署必须同时停止或排空所有副本，单独停止一个 Pod 不构成维护窗口。
+Go 版本的 blob GC 在维护窗口中运行完整引用扫描。标准方案先从入口摘除应用，优雅排空正在进行的上传和下载，再停止所有 Go 实例、旧版本二进制、Worker/上传脚本，以及会写入或删除 R2 对象的定时任务。扫描和删除期间完全停止应用下载流量。多副本部署必须同时排空并停止所有副本，单独停止一个 Pod 不构成维护窗口。
 
 维护工具默认只读，先执行 dry-run：
 
@@ -142,14 +143,16 @@ Go 版本的 blob GC 在维护窗口中运行完整引用扫描。停止所有 G
 ./bashupload gc --offline --delete
 ```
 
-`--delete` 只删除没有有效 `a/` alias 引用的 `b/` 对象，并记录删除失败。删除后再次执行 `./bashupload gc --offline --dry-run` 做校验；省略 `--delete` 始终是只读模式。
+`--delete` 只删除没有有效 `a/` alias 引用的 `b/` 对象。每批请求使用非 quiet 响应核对每个 key，报告 `attempted`、`confirmed`、`failed`、`unknown` 和 `unstarted` 对象数；对象错误会全部汇总，传输错误会把该批标为 `unknown`，任一失败都会停止后续批次。出现 `failed` 或 `unknown` 时不要根据原候选列表盲目重试，应保持停流并重新扫描确认当前状态。删除后再次执行 `./bashupload gc --offline --dry-run` 做校验；省略 `--delete` 始终是只读模式。
 
 为容忍维护节点与 alias 写入节点之间的小幅时钟偏差，GC 默认在 alias 到期后继续保护其 blob 15 分钟。可用 `--expiry-grace 30m`（或 `--expiry-grace=30m`）设置更保守的窗口；该值必须为非负 Go duration。dry-run 和删除必须使用相同的 grace。将其设为 `0` 会取消时钟偏差保护，仅应在所有相关节点时钟已经确认同步时使用。
+
+GC 会将排序块、合并结果和孤儿清单写入本地临时目录，避免 alias/blob 数量直接放大内存。默认每个排序块包含 10,000 条 live 引用；可通过 `--sort-chunk-entries 20000` 调整。使用 `--work-dir /path/to/gc-work` 可选择具有足够可用空间的本地磁盘。临时文件在命令退出时自动删除，但维护期间所需磁盘空间仍与 live blob 引用及孤儿数量线性相关。dry-run 和 delete 应使用相同的工作目录容量规划。
 
 Docker 维护顺序示例：
 
 ```bash
-# 1. 先禁止入口流量中的新写入，并等待上传请求结束
+# 1. 从入口摘除应用，停止接收新请求并优雅排空现有上传和下载
 docker compose stop bashupload-go
 
 # 2. 使用同一组 R2 环境变量运行只读扫描
@@ -163,7 +166,7 @@ docker compose run --rm bashupload-go gc --offline --dry-run
 docker compose up -d bashupload-go
 ```
 
-Kubernetes 部署还必须暂停 Worker/cron，并停止或排空所有应用 Pod，阻止它们在扫描期间重新创建。完成后重启全部 Go 副本，恢复入口和定时任务，再验证过期清理。已有 `c/` 链接继续按旧规则兼容和清理；维护扫描只处理 `b/` 共享 blob。
+Kubernetes 部署还必须暂停 Worker route/cron，并等待已经开始的 Worker 请求结束；随后停止或排空所有应用 Pod，阻止它们在扫描期间重新创建。Compose 的 `stop_grace_period` 和 Helm 的 `lifecycle.terminationGracePeriodSeconds` 必须大于环境中最长上传/下载和清理操作的预期耗时，默认值不足时应先调大。完成后重启全部 Go 副本，恢复入口和定时任务，再验证过期清理。已有 `c/` 链接继续按旧规则兼容和清理；维护扫描只处理 `b/` 共享 blob。
 
 #### 请求成本估算
 
@@ -176,7 +179,9 @@ Kubernetes 部署还必须暂停 Worker/cron，并停止或排空所有应用 Po
 | LIST `b/` | `P_b` | 0 |
 | `DeleteObjects`（每批最多 1000 个 key） | 另计删除操作数 | 0 |
 
-也就是 `A approx P_a + P_b`、`B approx N_a`，另有 `ceil(N_o / 1000)` 次独立的 `DeleteObjects` 操作；工具不扫描 `t/`，也不删除过期 alias，后者仍由应用重启后的日常清理器处理。以 100 万 alias、10 万 blob、20 万孤儿 blob 为例，一次维护约需 1000 次 alias LIST、100 次 blob LIST、约 100 万次 alias GET，以及 200 次 `DeleteObjects`。停机维护的成本优势来自按需运行，避免在线 GC 的反复扫描、租约和二次确认。
+一次完整扫描的成本是 `A approx P_a + P_b`、`B approx N_a`。只有带 `--delete` 的扫描另外产生 `ceil(N_o / 1000)` 次 `DeleteObjects` 操作；工具不扫描 `t/`，也不删除过期 alias，后者仍由应用重启后的日常清理器处理。
+
+推荐维护顺序包含三次完整扫描：删除前 dry-run、`--delete` 自身的重新扫描，以及删除后的验证 dry-run。因此扫描请求合计约为 `A approx 3 * (P_a + P_b)`、`B approx 3 * N_a`，再加删除阶段的 `ceil(N_o / 1000)` 次 `DeleteObjects`。以 100 万 alias、10 万 blob、20 万孤儿 blob 为例，单次扫描约需 1000 次 alias LIST、100 次 blob LIST 和 100 万次 alias GET；推荐的三次扫描共约 3300 次 LIST、300 万次 GET，删除阶段另有约 200 次 `DeleteObjects`。停机维护的成本优势来自按需运行，避免在线 GC 的反复扫描、租约和二次确认。
 
 ## 性能调优
 

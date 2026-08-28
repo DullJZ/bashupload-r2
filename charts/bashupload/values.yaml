@@ -86,6 +86,12 @@ nodeAffinity:
   # excludeNodes:
   #   - your-control-plane-node
 
+# Graceful termination. The preStop delay lets readiness changes propagate;
+# the remaining grace window is available for large uploads and R2 cleanup.
+lifecycle:
+  preStopDelaySeconds: 10
+  terminationGracePeriodSeconds: 660
+
 # Container resources
 resources:
   bashupload:
@@ -113,9 +119,9 @@ probes:
       failureThreshold: 3
     readiness:
       initialDelaySeconds: 10
-      periodSeconds: 10
+      periodSeconds: 2
       timeoutSeconds: 5
-      failureThreshold: 3
+      failureThreshold: 1
   nginx:
     liveness:
       initialDelaySeconds: 10
@@ -124,6 +130,6 @@ probes:
       failureThreshold: 3
     readiness:
       initialDelaySeconds: 5
-      periodSeconds: 10
+      periodSeconds: 2
       timeoutSeconds: 5
-      failureThreshold: 3
+      failureThreshold: 1

@@ -135,6 +135,16 @@ data:
                 return 200 'S6GVLTLHQPLW1RLTWUKOY3I8JI46Y5HO';
             }
 
+            location = /readyz {
+                proxy_pass http://127.0.0.1:3000/readyz;
+                proxy_connect_timeout 1s;
+                proxy_read_timeout 1s;
+            }
+
+            location = /-/drain {
+                return 404;
+            }
+
             location / {
                 proxy_pass http://127.0.0.1:3000;
                 proxy_set_header Host $host;
@@ -162,6 +172,7 @@ spec:
       labels:
         app: bashupload
     spec:
+      terminationGracePeriodSeconds: 660
       # 可选：排除特定节点（如控制平面节点）
       # 取消注释并修改节点名称以启用
       # affinity:
@@ -198,6 +209,13 @@ spec:
             limits:
               cpu: "0.5"
               memory: "128Mi"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 10; nginx -s quit; while kill -0 1 2>/dev/null; do sleep 1; done
           livenessProbe:
             httpGet:
               path: /servads.txt
@@ -208,12 +226,12 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /servads.txt
+              path: /readyz
               port: http
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 2
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 1
 
         # Bashupload 容器 - 主应用
         - name: bashupload
@@ -236,9 +254,16 @@ spec:
             limits:
               cpu: "1"
               memory: "256Mi"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - wget --quiet --output-document=/dev/null --post-data='' http://127.0.0.1:3000/-/drain; sleep 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: app
             initialDelaySeconds: 40
             periodSeconds: 30
@@ -246,12 +271,12 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /
+              path: /readyz
               port: app
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 2
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 1
 
       volumes:
         - name: nginx-conf

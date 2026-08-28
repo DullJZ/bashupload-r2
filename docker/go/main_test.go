@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +24,127 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 )
+
+func TestHTTPHandlerDrainState(t *testing.T) {
+	var ready atomic.Bool
+	ready.Store(true)
+	handler := newHTTPHandler(&ready)
+
+	request := func(method, path, remoteAddr string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = remoteAddr
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+
+	if got := request(http.MethodGet, "/readyz", "192.0.2.1:1234").Code; got != http.StatusOK {
+		t.Fatalf("ready status = %d, want %d", got, http.StatusOK)
+	}
+	if got := request(http.MethodPost, "/-/drain", "192.0.2.1:1234").Code; got != http.StatusForbidden {
+		t.Fatalf("remote drain status = %d, want %d", got, http.StatusForbidden)
+	}
+	if got := request(http.MethodPost, "/-/drain", "127.0.0.1:1234").Code; got != http.StatusAccepted {
+		t.Fatalf("local drain status = %d, want %d", got, http.StatusAccepted)
+	}
+	if got := request(http.MethodGet, "/readyz", "192.0.2.1:1234").Code; got != http.StatusServiceUnavailable {
+		t.Fatalf("draining readiness status = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	if got := request(http.MethodGet, "/api/config", "192.0.2.1:1234").Code; got != http.StatusServiceUnavailable {
+		t.Fatalf("new request while draining status = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	if got := request(http.MethodGet, "/healthz", "192.0.2.1:1234").Code; got != http.StatusOK {
+		t.Fatalf("liveness while draining status = %d, want %d", got, http.StatusOK)
+	}
+}
+
+func TestServeUntilShutdownWaitsForHandlerAndCleanup(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusNoContent)
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cleanupCtx, stopCleanup := context.WithCancel(ctx)
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	cleanupDone := startScheduledCleanup(cleanupCtx, false, time.Millisecond, time.Hour, func() {
+		close(cleanupStarted)
+		<-releaseCleanup
+	})
+	var ready atomic.Bool
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveUntilShutdown(ctx, listener, server, &ready, stopCleanup, cleanupDone)
+	}()
+
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start")
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get("http://" + listener.Addr().String())
+		if err == nil {
+			response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach handler")
+	}
+
+	cancel()
+	eventually(t, time.Second, func() bool { return !ready.Load() }, "readiness did not fail during shutdown")
+	select {
+	case err := <-serveDone:
+		t.Fatalf("server returned before active work completed: %v", err)
+	default:
+	}
+
+	close(releaseRequest)
+	select {
+	case err := <-serveDone:
+		t.Fatalf("server returned before cleanup completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseCleanup)
+
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("serveUntilShutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not finish after active work completed")
+	}
+	if err := <-requestDone; err != nil {
+		t.Fatalf("in-flight request failed: %v", err)
+	}
+}
+
+func eventually(t *testing.T, timeout time.Duration, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal(message)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 const offlineTestBucket = "offline-gc-test"
 
@@ -44,11 +169,12 @@ type offlineTestS3 struct {
 }
 
 type scriptedMaintenanceStore struct {
-	pages        []*s3.ListObjectsV2Output
-	listCalls    int
-	deleteOutput *s3.DeleteObjectsOutput
-	deleteErr    error
-	deleteCalls  int
+	pages         []*s3.ListObjectsV2Output
+	listCalls     int
+	deleteOutputs []*s3.DeleteObjectsOutput
+	deleteErrs    []error
+	deleteInputs  []*s3.DeleteObjectsInput
+	deleteCalls   int
 }
 
 func (s *scriptedMaintenanceStore) ListObjectsV2(*s3.ListObjectsV2Input) (*s3.ListObjectsV2Output, error) {
@@ -64,9 +190,19 @@ func (*scriptedMaintenanceStore) GetObject(*s3.GetObjectInput) (*s3.GetObjectOut
 	return nil, fmt.Errorf("unexpected GET request")
 }
 
-func (s *scriptedMaintenanceStore) DeleteObjects(*s3.DeleteObjectsInput) (*s3.DeleteObjectsOutput, error) {
+func (s *scriptedMaintenanceStore) DeleteObjects(input *s3.DeleteObjectsInput) (*s3.DeleteObjectsOutput, error) {
+	call := s.deleteCalls
 	s.deleteCalls++
-	return s.deleteOutput, s.deleteErr
+	s.deleteInputs = append(s.deleteInputs, input)
+	var output *s3.DeleteObjectsOutput
+	if call < len(s.deleteOutputs) {
+		output = s.deleteOutputs[call]
+	}
+	var err error
+	if call < len(s.deleteErrs) {
+		err = s.deleteErrs[call]
+	}
+	return output, err
 }
 
 func newOfflineTestS3() (*offlineTestS3, *httptest.Server, *s3.S3) {
@@ -599,6 +735,65 @@ func TestOfflineGCPaginatesAliasListing(t *testing.T) {
 	}
 }
 
+func TestOfflineGCExternalMergeAndWorkDirectoryCleanup(t *testing.T) {
+	store, server, client := newOfflineTestS3()
+	defer server.Close()
+
+	now := time.Now().UTC()
+	for i := 0; i < 70; i++ {
+		blobKey := fmt.Sprintf("b/%064x", i+1)
+		store.put(blobKey, []byte("live"))
+		addOfflineAlias(store, fmt.Sprintf("a/%04d", i), blobKey, now.Add(time.Hour))
+		if i%10 == 0 {
+			addOfflineAlias(store, fmt.Sprintf("a/duplicate-%04d", i), blobKey, now.Add(time.Hour))
+		}
+	}
+	orphanKey := fmt.Sprintf("b/%064x", 1000)
+	store.put(orphanKey, []byte("orphan"))
+	workDir := t.TempDir()
+
+	stats, err := runOfflineGCWithStore(client, store.bucket, now, offlineGCOptions{
+		expiryGrace:      defaultOfflineGCExpiryGrace,
+		workDir:          workDir,
+		sortChunkEntries: 1,
+	})
+	if err != nil {
+		t.Fatalf("runOfflineGCWithStore: %v", err)
+	}
+	if stats.liveAliases != 77 || stats.blobsScanned != 71 || stats.unreferencedBlobs != 1 {
+		t.Fatalf("unexpected external merge stats: %+v", stats)
+	}
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		t.Fatalf("read work directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary GC files were not cleaned up: %v", entries)
+	}
+}
+
+func TestOfflineGCMissingLiveBlobAfterOrphanStillFailsBeforeDelete(t *testing.T) {
+	store, server, client := newOfflineTestS3()
+	defer server.Close()
+
+	orphanKey := fmt.Sprintf("b/%064x", 1)
+	missingKey := fmt.Sprintf("b/%064x", 2)
+	store.put(orphanKey, []byte("orphan"))
+	addOfflineAlias(store, "a/live-missing", missingKey, time.Now().UTC().Add(time.Hour))
+
+	stats, err := runOfflineGCWithStore(client, store.bucket, time.Now().UTC(), offlineGCOptions{
+		deleteMode:       true,
+		expiryGrace:      defaultOfflineGCExpiryGrace,
+		sortChunkEntries: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), missingKey) {
+		t.Fatalf("missing live blob error = %v", err)
+	}
+	if stats.unreferencedBlobs != 1 || store.deletedKeyCount() != 0 || !store.has(orphanKey) {
+		t.Fatalf("validation failure was not fail-closed: stats=%+v deletes=%d", stats, store.deletedKeyCount())
+	}
+}
+
 func TestOfflineGCRejectsMalformedPagination(t *testing.T) {
 	trueValue := true
 	falseValue := false
@@ -631,13 +826,35 @@ func TestOfflineGCRejectsMalformedPagination(t *testing.T) {
 				Contents:    []*s3.Object{{Key: aws.String("b/not-an-alias"), Size: aws.Int64(1)}},
 			}},
 		},
+		{
+			name: "keys out of order",
+			pages: []*s3.ListObjectsV2Output{{
+				IsTruncated: &falseValue,
+				Contents: []*s3.Object{
+					{Key: aws.String("a/z"), Size: aws.Int64(1)},
+					{Key: aws.String("a/a"), Size: aws.Int64(1)},
+				},
+			}},
+		},
+		{
+			name: "duplicate key",
+			pages: []*s3.ListObjectsV2Output{{
+				IsTruncated: &falseValue,
+				Contents: []*s3.Object{
+					{Key: aws.String("a/same"), Size: aws.Int64(1)},
+					{Key: aws.String("a/same"), Size: aws.Int64(1)},
+				},
+			}},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &scriptedMaintenanceStore{pages: tc.pages}
 			var stats offlineGCStats
-			if _, err := listOfflineObjects(store, offlineTestBucket, "a/", &stats); err == nil {
+			if err := walkOfflineObjects(store, offlineTestBucket, "a/", t.TempDir(), &stats, func(offlineObject) error {
+				return nil
+			}); err == nil {
 				t.Fatal("malformed pagination unexpectedly succeeded")
 			}
 			if store.listCalls != len(tc.pages) {
@@ -650,39 +867,118 @@ func TestOfflineGCRejectsMalformedPagination(t *testing.T) {
 	}
 }
 
-func TestOfflineGCDeleteObjectsFailures(t *testing.T) {
-	tests := []struct {
-		name   string
-		output *s3.DeleteObjectsOutput
-		err    error
-	}{
-		{name: "request failure", err: fmt.Errorf("injected DeleteObjects failure")},
-		{name: "nil response"},
-		{
-			name: "partial error",
-			output: &s3.DeleteObjectsOutput{Errors: []*s3.Error{{
-				Key:     aws.String("b/failed"),
-				Code:    aws.String("AccessDenied"),
-				Message: aws.String("denied"),
-			}}},
-		},
-		{
-			name:   "nil partial error",
-			output: &s3.DeleteObjectsOutput{Errors: []*s3.Error{nil}},
-		},
+func successfulDeleteOutput(keys []string) *s3.DeleteObjectsOutput {
+	output := &s3.DeleteObjectsOutput{Deleted: make([]*s3.DeletedObject, 0, len(keys))}
+	for _, key := range keys {
+		output.Deleted = append(output.Deleted, &s3.DeletedObject{Key: aws.String(key)})
 	}
+	return output
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			store := &scriptedMaintenanceStore{deleteOutput: tc.output, deleteErr: tc.err}
-			var stats offlineGCStats
-			if err := deleteOfflineObjects(store, offlineTestBucket, []string{"b/failed"}, &stats); err == nil {
-				t.Fatal("DeleteObjects failure unexpectedly succeeded")
-			}
-			if store.deleteCalls != 1 || stats.deleteObjectsRequests != 1 {
-				t.Fatalf("DeleteObjects calls = %d, stats = %d; want 1", store.deleteCalls, stats.deleteObjectsRequests)
-			}
-		})
+func deleteTestKeys(count int) []string {
+	keys := make([]string, count)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("b/%064x", i)
+	}
+	return keys
+}
+
+func TestOfflineGCDeleteObjectsSecondBatchFailureStopsLaterBatches(t *testing.T) {
+	keys := deleteTestKeys(2001)
+	secondBatch := successfulDeleteOutput(keys[1000:2000])
+	secondBatch.Deleted = secondBatch.Deleted[1:]
+	secondBatch.Errors = []*s3.Error{{
+		Key: aws.String(keys[1000]), Code: aws.String("AccessDenied"), Message: aws.String("denied"),
+	}}
+	store := &scriptedMaintenanceStore{deleteOutputs: []*s3.DeleteObjectsOutput{
+		successfulDeleteOutput(keys[:1000]), secondBatch,
+	}}
+	var stats offlineGCStats
+	err := deleteOfflineObjects(store, offlineTestBucket, keys, &stats)
+	if err == nil || !strings.Contains(err.Error(), keys[1000]) {
+		t.Fatalf("second-batch error = %v", err)
+	}
+	if store.deleteCalls != 2 {
+		t.Fatalf("DeleteObjects calls = %d, want 2", store.deleteCalls)
+	}
+	if stats.deleteAttempted != 2000 || stats.deleteConfirmed != 1999 || stats.deleteFailed != 1 || stats.deleteUnknown != 0 || stats.deleteUnstarted != 1 {
+		t.Fatalf("unexpected delete stats: %+v", stats)
+	}
+}
+
+func TestOfflineGCDeleteObjectsReportsAllPartialFailures(t *testing.T) {
+	keys := deleteTestKeys(4)
+	output := successfulDeleteOutput([]string{keys[0], keys[3]})
+	output.Errors = []*s3.Error{
+		{Key: aws.String(keys[1]), Code: aws.String("AccessDenied"), Message: aws.String("denied")},
+		{Key: aws.String(keys[2]), Code: aws.String("ObjectLocked"), Message: aws.String("locked")},
+	}
+	store := &scriptedMaintenanceStore{deleteOutputs: []*s3.DeleteObjectsOutput{output}}
+	var stats offlineGCStats
+	err := deleteOfflineObjects(store, offlineTestBucket, keys, &stats)
+	if err == nil || !strings.Contains(err.Error(), keys[1]) || !strings.Contains(err.Error(), keys[2]) {
+		t.Fatalf("partial failure did not include every object error: %v", err)
+	}
+	if stats.deleteAttempted != 4 || stats.deleteConfirmed != 2 || stats.deleteFailed != 2 || stats.deleteUnknown != 0 || stats.deleteUnstarted != 0 {
+		t.Fatalf("unexpected delete stats: %+v", stats)
+	}
+}
+
+func TestOfflineGCDeleteObjectsRejectsOmittedKey(t *testing.T) {
+	keys := deleteTestKeys(2)
+	store := &scriptedMaintenanceStore{deleteOutputs: []*s3.DeleteObjectsOutput{successfulDeleteOutput(keys[:1])}}
+	var stats offlineGCStats
+	err := deleteOfflineObjects(store, offlineTestBucket, keys, &stats)
+	if err == nil || !strings.Contains(err.Error(), keys[1]) {
+		t.Fatalf("omitted-key error = %v", err)
+	}
+	if stats.deleteAttempted != 2 || stats.deleteConfirmed != 1 || stats.deleteFailed != 0 || stats.deleteUnknown != 1 || stats.deleteUnstarted != 0 {
+		t.Fatalf("unexpected delete stats: %+v", stats)
+	}
+}
+
+func TestOfflineGCDeleteObjectsRejectsDuplicateKeyResult(t *testing.T) {
+	keys := deleteTestKeys(2)
+	output := successfulDeleteOutput([]string{keys[0], keys[0], keys[1]})
+	store := &scriptedMaintenanceStore{deleteOutputs: []*s3.DeleteObjectsOutput{output}}
+	var stats offlineGCStats
+	err := deleteOfflineObjects(store, offlineTestBucket, keys, &stats)
+	if err == nil || !strings.Contains(err.Error(), keys[0]) {
+		t.Fatalf("duplicate-key error = %v", err)
+	}
+	if stats.deleteAttempted != 2 || stats.deleteConfirmed != 1 || stats.deleteFailed != 0 || stats.deleteUnknown != 1 || stats.deleteUnstarted != 0 {
+		t.Fatalf("unexpected delete stats: %+v", stats)
+	}
+}
+
+func TestOfflineGCDeleteObjectsTransportFailureMarksBatchUnknown(t *testing.T) {
+	keys := deleteTestKeys(1001)
+	store := &scriptedMaintenanceStore{deleteErrs: []error{fmt.Errorf("injected network failure")}}
+	var stats offlineGCStats
+	if err := deleteOfflineObjects(store, offlineTestBucket, keys, &stats); err == nil {
+		t.Fatal("network failure unexpectedly succeeded")
+	}
+	if store.deleteCalls != 1 || stats.deleteAttempted != 1000 || stats.deleteConfirmed != 0 || stats.deleteFailed != 0 || stats.deleteUnknown != 1000 || stats.deleteUnstarted != 1 {
+		t.Fatalf("unexpected delete stats: calls=%d stats=%+v", store.deleteCalls, stats)
+	}
+}
+
+func TestOfflineGCDeleteObjectsSuccessfulVerifiedResponses(t *testing.T) {
+	keys := deleteTestKeys(1001)
+	store := &scriptedMaintenanceStore{deleteOutputs: []*s3.DeleteObjectsOutput{
+		successfulDeleteOutput(keys[:1000]), successfulDeleteOutput(keys[1000:]),
+	}}
+	var stats offlineGCStats
+	if err := deleteOfflineObjects(store, offlineTestBucket, keys, &stats); err != nil {
+		t.Fatalf("DeleteObjects success: %v", err)
+	}
+	if stats.deleteAttempted != 1001 || stats.deleteConfirmed != 1001 || stats.deleteFailed != 0 || stats.deleteUnknown != 0 || stats.deleteUnstarted != 0 {
+		t.Fatalf("unexpected delete stats: %+v", stats)
+	}
+	for i, input := range store.deleteInputs {
+		if input.Delete == nil || input.Delete.Quiet == nil || aws.BoolValue(input.Delete.Quiet) {
+			t.Fatalf("DeleteObjects request %d did not explicitly request a non-quiet response", i+1)
+		}
 	}
 }
 
@@ -707,6 +1003,9 @@ func TestOfflineGCBatchesMoreThanThousandDeletes(t *testing.T) {
 	if stats.deleteObjectsRequests != 2 {
 		t.Fatalf("expected two DeleteObjects requests, got %d", stats.deleteObjectsRequests)
 	}
+	if stats.deleteAttempted != 1001 || stats.deleteConfirmed != 1001 || stats.deleteFailed != 0 || stats.deleteUnknown != 0 || stats.deleteUnstarted != 0 {
+		t.Fatalf("unexpected delete accounting: %+v", stats)
+	}
 	for _, key := range blobKeys {
 		if store.has(key) {
 			t.Fatalf("blob %s survived batch delete", key)
@@ -728,10 +1027,12 @@ func TestRunGCCommandValidatesArguments(t *testing.T) {
 
 func TestParseOfflineGCArgsDefaultsToDryRun(t *testing.T) {
 	tests := []struct {
-		args       []string
-		wantDelete bool
-		wantGrace  time.Duration
-		wantError  bool
+		args            []string
+		wantDelete      bool
+		wantGrace       time.Duration
+		wantWorkDir     string
+		wantSortEntries int
+		wantError       bool
 	}{
 		{args: []string{"--offline"}, wantGrace: defaultOfflineGCExpiryGrace},
 		{args: []string{"--offline", "--dry-run"}, wantGrace: defaultOfflineGCExpiryGrace},
@@ -739,6 +1040,8 @@ func TestParseOfflineGCArgsDefaultsToDryRun(t *testing.T) {
 		{args: []string{"--offline", "--expiry-grace", "30m"}, wantGrace: 30 * time.Minute},
 		{args: []string{"--offline", "--delete", "--expiry-grace=1h"}, wantDelete: true, wantGrace: time.Hour},
 		{args: []string{"--offline", "--expiry-grace=0"}},
+		{args: []string{"--offline", "--work-dir", "/tmp/gc", "--sort-chunk-entries", "17"}, wantGrace: defaultOfflineGCExpiryGrace, wantWorkDir: "/tmp/gc", wantSortEntries: 17},
+		{args: []string{"--offline", "--work-dir=/tmp/gc", "--sort-chunk-entries=23"}, wantGrace: defaultOfflineGCExpiryGrace, wantWorkDir: "/tmp/gc", wantSortEntries: 23},
 		{args: []string{"--delete"}, wantError: true},
 		{args: []string{"--offline", "--dry-run", "--delete"}, wantError: true},
 		{args: []string{"--offline", "--delete", "--dry-run"}, wantError: true},
@@ -746,6 +1049,11 @@ func TestParseOfflineGCArgsDefaultsToDryRun(t *testing.T) {
 		{args: []string{"--offline", "--expiry-grace="}, wantError: true},
 		{args: []string{"--offline", "--expiry-grace", "soon"}, wantError: true},
 		{args: []string{"--offline", "--expiry-grace=-1s"}, wantError: true},
+		{args: []string{"--offline", "--work-dir="}, wantError: true},
+		{args: []string{"--offline", "--work-dir", "--delete"}, wantError: true},
+		{args: []string{"--offline", "--sort-chunk-entries", "0"}, wantError: true},
+		{args: []string{"--offline", "--sort-chunk-entries=-1"}, wantError: true},
+		{args: []string{"--offline", "--sort-chunk-entries=100001"}, wantError: true},
 	}
 
 	for _, tc := range tests {
@@ -758,6 +1066,15 @@ func TestParseOfflineGCArgsDefaultsToDryRun(t *testing.T) {
 		}
 		if !tc.wantError && got.expiryGrace != tc.wantGrace {
 			t.Errorf("parseOfflineGCArgs(%v) grace = %s, want %s", tc.args, got.expiryGrace, tc.wantGrace)
+		}
+		if !tc.wantError {
+			wantSortEntries := tc.wantSortEntries
+			if wantSortEntries == 0 {
+				wantSortEntries = defaultOfflineGCSortChunkEntries
+			}
+			if got.workDir != tc.wantWorkDir || got.sortChunkEntries != wantSortEntries {
+				t.Errorf("parseOfflineGCArgs(%v) workDir=%q sortChunkEntries=%d, want %q/%d", tc.args, got.workDir, got.sortChunkEntries, tc.wantWorkDir, wantSortEntries)
+			}
 		}
 	}
 }
